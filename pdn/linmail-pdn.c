@@ -122,6 +122,9 @@ void SaveRestartData();
 void GetPGConfig();
 VOID DeleteRedundantMessages();
 
+extern char RlineVer[50];
+void initUTF8();
+
 static int Slowtimer = 0;
 
 //	Small helpers LinBPQ.c and CommonCode.c provide
@@ -384,7 +387,21 @@ int main(int argc, char * argv[])
 	signal(SIGINT, SigHandler);
 	signal(SIGTERM, SigHandler);
 
+	signal(SIGHUP, SIG_IGN);
+
 	printf("linmail-pdn: G8BPQ Mail Server %s for packet.net\n", TextVerstring);
+
+	// As LinBPQ.c main()
+
+	sprintf(RlineVer, "LinBPQ%d.%d.%d", Ver[0], Ver[1], Ver[2]);
+
+	tzset();
+	_MYTIMEZONE = _timezone;
+
+	if (_MYTIMEZONE < -86400 || _MYTIMEZONE > 86400)
+		_MYTIMEZONE = 0;
+
+	initUTF8();
 
 	// Defaults, then environment (as set by the pdn app supervisor), then arguments
 
@@ -399,6 +416,7 @@ int main(int argc, char * argv[])
 
 	EnvCopy(PdnCfg.AppCall, sizeof(PdnCfg.AppCall), "PDN_APP_CALLSIGN");
 	EnvCopy(PdnCfg.NodeCall, sizeof(PdnCfg.NodeCall), "PDN_NODE_CALLSIGN");
+	EnvCopy(PdnCfg.NodeAlias, sizeof(PdnCfg.NodeAlias), "PDN_NODE_ALIAS");
 	EnvCopy(PdnCfg.RHPUser, sizeof(PdnCfg.RHPUser), "PDN_RHP_USER");
 	EnvCopy(PdnCfg.RHPPass, sizeof(PdnCfg.RHPPass), "PDN_RHP_PASS");
 	EnvCopy(PdnCfg.DefaultPort, sizeof(PdnCfg.DefaultPort), "PDN_LINMAIL_DEFAULTPORT");
@@ -431,6 +449,7 @@ int main(int argc, char * argv[])
 
 	_strupr(PdnCfg.AppCall);
 	_strupr(PdnCfg.NodeCall);
+	_strupr(PdnCfg.NodeAlias);
 
 	if (DataDir[0])
 		strcpy(BPQDirectory, DataDir);

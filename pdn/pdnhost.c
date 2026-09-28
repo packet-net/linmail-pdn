@@ -907,7 +907,10 @@ static void ProcessOpenReply(json_t * Msg)
 
 		STREAM->Mode = PDN_NODECMD;
 
-		if (strstr(Upper, "BUSY") || strstr(Upper, "REFUSED") || strstr(Upper, " DM"))
+		// pdn's openReply does not say whether the far end sent DM (busy) or
+		// never answered, so only an explicit "busy" becomes Busy from.
+
+		if (strstr(Upper, "BUSY"))
 			NodeReply(n, "Busy from %s\r", STREAM->Remote);
 		else
 			NodeReply(n, "Failure with %s\r", STREAM->Remote);
