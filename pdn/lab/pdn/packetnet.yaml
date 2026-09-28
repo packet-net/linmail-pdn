@@ -1,0 +1,37 @@
+schemaVersion: 2
+
+identity:
+  callsign: N0PDN
+  alias: PDNLAB
+
+ports:
+  - id: bpq
+    enabled: true
+    transport:
+      kind: axudp
+      host: 127.0.0.1
+      port: 19093
+      localPort: 19094
+    link:
+      dial: v20
+
+services:
+  banner: "Welcome to {node} ({call})"
+  prompt: "{call}> "
+
+management:
+  telnet:
+    enabled: true
+    bind: 127.0.0.1
+    port: 18011
+  http:
+    bind: 127.0.0.1
+    port: 18080
+  auth:
+    enabled: false
+
+rhp:
+  enabled: true
+  bind: 127.0.0.1
+  port: 19000
+  requireAuth: false

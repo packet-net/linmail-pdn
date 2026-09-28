@@ -21,6 +21,10 @@ pdn/linmail-pdn -d /var/lib/linmail -r 127.0.0.1:9000 -c GB7XYZ -n GB7XYZ-5 -m 1
 
 Settings come from the pdn app supervisor's environment (`PDN_APP_STATE`, `PDN_RHP_HOST`, `PDN_RHP_PORT`, `PDN_APP_CALLSIGN`, `PDN_NODE_CALLSIGN`, `PDN_NODE_ALIAS`), then `PDN_LINMAIL_PORTMAP` and `PDN_LINMAIL_DEFAULTPORT`, then the command line (`linmail-pdn -h`). The port map turns the port numbers in existing BPQ connect scripts into pdn port ids. Needs libjansson and libconfig.
 
+## Lab
+
+`lab/` holds the loopback lab used for the proof: a pdn node (N0PDN, one AXUDP port `bpq`, RHP on 19000), a LinBPQ node with mail (N0BPQ, BBS N0BPQ-1) built from this fork, and linmail-pdn (BBS N0LMB). `lab/lab.sh start WORKDIR packetnet.dll linbpq` starts all three; `lab/session.py` logs in to the LinBPQ telnet port as N0USR, connects to a BBS, sends a personal message, lists it and reads it back. Posting to `N0ABC @ N0BPQ` on N0LMB, or to `N0XYZ @ N0LMB` on N0BPQ (`BBS` = `LOCAL`), forwards it with FBB B2 compression within a few seconds.
+
 ## Upstream edits
 
 None. Every mail source file builds as it is. The build links `BBSUtilities.c BBSHTMLConfig.c FBBRoutines.c MailCommands.c MailDataDefs.c MailRouting.c MailTCP.c MBLRoutines.c WPRoutines.c WebMail.c NNTPRoutines.c lzhuf32.c` plus the node-free helpers `Housekeeping.c UIRoutines.c utf8Routines.c md5.c compatbits.c CMSAuth.c`. If a later upstream change needs a pdn-specific branch, put it behind `#ifdef PDN_LINMAIL` and list it here.
