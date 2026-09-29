@@ -10,7 +10,7 @@
 # default one is written, with the BBS name taken from the app callsign. To
 # move an existing LinBPQ mailbox across, see MIGRATING.md.
 #
-# Needs a pdn node newer than 0.57.0: linmail-pdn closes a session as soon as
+# Needs pdn node 0.58.0 or newer: linmail-pdn closes a session as soon as
 # the mail code hangs up, and relies on pdn to finish sending first
 # (packet.net#850). The manifest has no field for a minimum node version.
 manifest: 1

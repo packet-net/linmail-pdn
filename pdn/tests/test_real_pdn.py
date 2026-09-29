@@ -392,7 +392,7 @@ class SlowLink:
         self.b.close()
 
 
-# The first pdn node release after 0.57.0 has packet.net#852 (the fix for
+# pdn 0.58.0 is the first node release with packet.net#852 (the fix for
 # packet.net#850): closing an RHP handle keeps the AX.25 link up until the
 # peer has everything already sent, then disconnects. 0.57.0 and earlier
 # disconnect at once and throw the rest away.
@@ -425,7 +425,7 @@ def test_real_pdn_close_delivers_tail(tmp_path):
     the lab LinBPQ over a slow link. linmail-pdn closes the moment the mail
     code disconnects, and relies on pdn to finish sending first.
 
-    Needs a pdn with packet.net#852 (the first release after 0.57.0). Skipped
+    Needs pdn 0.58.0 or newer (packet.net#852). Skipped
     for an older pdn unless PDN_GRACEFUL_CLOSE=1, which runs it anyway to show
     it failing there; PDN_GRACEFUL_CLOSE=0 always skips it."""
     ports = {k: free_port() for k in ("pdn_telnet", "pdn_http", "rhp", "bpq_telnet", "bpq_http")}
@@ -460,7 +460,7 @@ def test_real_pdn_close_delivers_tail(tmp_path):
         choice = os.environ.get("PDN_GRACEFUL_CLOSE", "")
         if choice == "0" or (choice != "1" and not has_graceful_close(version)):
             pytest.skip(f"pdn {version} disconnects at once on close, dropping unsent data; "
-                        "needs the first pdn release after 0.57.0 (packet.net#850)")
+                        "needs pdn 0.58.0 or newer (packet.net#850)")
 
         procs.append(subprocess.Popen(
             [LINBPQ_BIN, "mail"], cwd=bpq_dir, stdin=subprocess.DEVNULL,

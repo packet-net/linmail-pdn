@@ -10,7 +10,7 @@ LinBPQ is John Wiseman G8BPQ's work, and this repository is a fork of [his LinBP
 
 ## Using it
 
-- You need a pdn node newer than 0.57.0 (see packet.net#850).
+- You need pdn node 0.58.0 or newer (see packet.net#850).
 - Install the `pdn-linmail` package from the [releases](https://github.com/packet-net/linmail-pdn/releases) on the machine running pdn, then enable **LinBPQ Mail** in the control panel.
 - Moving an existing LinBPQ mailbox across? Follow [MIGRATING.md](MIGRATING.md). Your files carry over unchanged, and you can go back at any time.
 
