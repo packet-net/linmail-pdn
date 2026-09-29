@@ -1,6 +1,6 @@
 # Upstream bugs found while building linmail-pdn
 
-These are in LinBPQ's own mail code, so they affect LinBPQ as well as linmail-pdn. linmail-pdn works round each one without editing the upstream files (details below), so nothing here blocks it. They're written up so Tom can decide whether to pass them on to John. Line numbers are from G8BPQ's LinBPQ 6.0.25.41 (commit 4b7a47b). Each crash was reproduced with AddressSanitizer.
+These are in LinBPQ's own mail code, so they affect LinBPQ as well as linmail-pdn. linmail-pdn works round each one without editing the upstream files (details below), so nothing here blocks it. They're written up so Tom can decide whether to pass them on to John, and each is tracked as an issue here with the `upstream-linbpq` label: [#3](https://github.com/packet-net/linmail-pdn/issues/3) (1), [#4](https://github.com/packet-net/linmail-pdn/issues/4) (2), [#5](https://github.com/packet-net/linmail-pdn/issues/5) (3), [#6](https://github.com/packet-net/linmail-pdn/issues/6) and [#7](https://github.com/packet-net/linmail-pdn/issues/7) (4). Close an issue when John fixes the bug upstream, and drop the workaround when the sync brings the fix in. Line numbers are from G8BPQ's LinBPQ 6.0.25.41 (commit 4b7a47b). Each crash was reproduced with AddressSanitizer.
 
 ## 1. Webmail form posts read fields that weren't sent
 

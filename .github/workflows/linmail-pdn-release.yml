@@ -121,3 +121,20 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "LinBPQ Mail for pdn $version" \
             --notes "The LinBPQ mail server (G8BPQ's LinBPQ $linbpq) as a Packet.NET (pdn) app package, for amd64, arm64 and armhf. Install on a box running the packetnet node: sudo apt install ./pdn-linmail_${version}_<arch>.deb. It lands in /usr/share/packetnet/apps/linmail; enable LinBPQ Mail from the node control panel. State lives in /var/lib/packetnet/apps/linmail and is kept across upgrades. Moving an existing LinBPQ mailbox across: /usr/share/doc/pdn-linmail/MIGRATING.md. This is a packet.net build, not an official G8BPQ release: please report problems at https://github.com/packet-net/linmail-pdn/issues, not to John."
+
+      - name: Tell the apt repo to rebuild
+        # Last, and only after the release exists: packet-net/apt indexes
+        # whatever is on releases/latest when it runs. A hard requirement, as in
+        # pdn-bbs: if packet-net/apt can't be told, the build fails rather than
+        # leaving apt stale until its daily rebuild.
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::APT_DISPATCH_TOKEN is not visible to this repo - cannot notify packet-net/apt"
+            exit 1
+          fi
+          payload=$(printf '{"event_type":"release-published","client_payload":{"repo":"%s","tag":"%s"}}' \
+            "$GITHUB_REPOSITORY" "$TAG")
+          printf '%s' "$payload" | gh api -X POST repos/packet-net/apt/dispatches --input -
