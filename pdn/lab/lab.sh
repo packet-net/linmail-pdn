@@ -3,8 +3,11 @@
 # loopback. LinBPQ reaches pdn over AXUDP (UDP 19093 <-> 19094); linmail-pdn
 # reaches pdn over RHPv2 (TCP 19000).
 #
-#   lab.sh start WORKDIR PACKETNET_DLL LINBPQ_BINARY
+#   lab.sh start WORKDIR PACKETNET LINBPQ_BINARY
 #   lab.sh stop WORKDIR
+#
+# PACKETNET is the packetnet binary from a pdn release, or packetnet.dll from
+# a source build (run with dotnet).
 #
 # Ports used: pdn 18011 (telnet), 18080 (http), 19000 (rhp), 19094/udp;
 # LinBPQ 18023 (telnet), 18088 (http), 19093/udp.
@@ -23,7 +26,12 @@ start)
 		[ -f "$WORK/$f" ] || cp "$HERE/$f" "$WORK/$f"
 	done
 
-	(cd "$WORK/pdn" && exec dotnet "$DLL" --config "$WORK/pdn/packetnet.yaml" --db "$WORK/pdn/pdn.db" \
+	case "$DLL" in
+	*.dll) PDN="dotnet $DLL" ;;
+	*) PDN="$DLL" ;;
+	esac
+
+	(cd "$WORK/pdn" && exec $PDN --config "$WORK/pdn/packetnet.yaml" --db "$WORK/pdn/pdn.db" \
 		> "$WORK/pdn/pdn.log" 2>&1) &
 	echo $! > "$WORK/pdn/pid"
 
@@ -44,7 +52,7 @@ stop)
 	done
 	;;
 *)
-	sed -n '2,12p' "$0"
+	sed -n '2,15p' "$0"
 	exit 1
 	;;
 esac

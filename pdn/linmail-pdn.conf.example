@@ -1,0 +1,42 @@
+# linmail-pdn settings. Copy to linmail-pdn.conf in the data directory (next
+# to linmail.cfg), or point at it with -f. key = value, # starts a comment.
+#
+# Under pdn the app supervisor sets PDN_RHP_HOST, PDN_RHP_PORT,
+# PDN_APP_CALLSIGN, PDN_NODE_CALLSIGN and PDN_NODE_ALIAS, and those win over
+# this file. Command line options win over both.
+
+# pdn's RHPv2 server
+rhp = 127.0.0.1:9000
+
+# RHP login, if the node has rhp.requireAuth set
+#rhp_user = linmail
+#rhp_pass = secret
+
+# The callsign the BBS answers to. Default: BBSName from linmail.cfg.
+#call = GB7XYZ
+
+# More callsigns to answer to, comma separated
+#alias = BBS
+
+# The pdn node's callsign and alias, used in the node replies the connect
+# script sees ("PDNLAB:GB7XYZ-5} Connected to GB7ABC")
+#node = GB7XYZ-5
+#node_alias = PDNLAB
+
+# Port numbers in existing BPQ connect scripts ("C 2 GB7ABC") mapped to pdn
+# port ids. The same numbers select the ports for UI frames (UIPort1, UIPort2
+# in linmail.cfg).
+portmap = 1=vhf, 2=hf
+
+# pdn port for a connect line with no port. Empty means only other apps on
+# the same node can be reached that way.
+#default_port = vhf
+
+# Seconds to hold a close after the last data sent
+#linger = 10
+
+# Print all RHP traffic
+#trace = 0
+
+# Log directory. Default: the data directory
+#logdir = /var/log/linmail

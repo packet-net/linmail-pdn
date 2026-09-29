@@ -123,6 +123,9 @@ void GetPGConfig();
 VOID DeleteRedundantMessages();
 
 extern char RlineVer[50];
+extern int SMTPInPort;
+extern int POP3InPort;
+extern int NNTPInPort;
 void initUTF8();
 
 static int Slowtimer = 0;
@@ -312,28 +315,32 @@ static char HelpScreen[] =
 	"Usage: linmail-pdn [options]\n"
 	"  -d, --datadir DIR    Directory holding linmail.cfg and the mail files\n"
 	"                       (default $PDN_APP_STATE, else the current directory)\n"
+	"  -f, --config FILE    linmail-pdn settings file (default DIR/linmail-pdn.conf)\n"
 	"  -l, --logdir DIR     Directory for logs (default the data directory)\n"
-	"  -r, --rhp HOST:PORT  pdn RHPv2 server (default $PDN_RHP_HOST:$PDN_RHP_PORT,\n"
-	"                       else 127.0.0.1:9000)\n"
-	"  -c, --call CALL      Callsign the BBS answers to (default $PDN_APP_CALLSIGN,\n"
-	"                       else the BBS name from linmail.cfg)\n"
+	"  -r, --rhp HOST:PORT  pdn RHPv2 server (default 127.0.0.1:9000)\n"
+	"  -c, --call CALL      Callsign the BBS answers to (default the BBS name)\n"
+	"  -a, --alias CALLS    More callsigns to answer to, e.g. BBS\n"
 	"  -n, --node CALL      pdn node callsign, used in connect replies\n"
-	"                       (default $PDN_NODE_CALLSIGN)\n"
 	"  -m, --portmap MAP    Connect script port numbers to pdn port ids,\n"
-	"                       e.g. 1=vhf,2=hf (default $PDN_LINMAIL_PORTMAP)\n"
+	"                       e.g. 1=vhf,2=hf\n"
 	"  -p, --defport ID     pdn port for a connect line with no port\n"
 	"  -L, --linger SECS    Hold a close this long after our last send (default 10)\n"
-	"  -u, --user USER      RHP auth user (default $PDN_RHP_USER)\n"
-	"  -w, --pass PASS      RHP auth password (default $PDN_RHP_PASS)\n"
+	"  -u, --user USER      RHP auth user\n"
+	"  -w, --pass PASS      RHP auth password\n"
 	"  -t, --trace          Print all RHP traffic\n"
-	"  -h, --help           Show this help\n";
+	"  -h, --help           Show this help\n"
+	"Settings are taken from the settings file, then the environment the pdn app\n"
+	"supervisor sets (PDN_RHP_HOST, PDN_RHP_PORT, PDN_APP_CALLSIGN, PDN_NODE_CALLSIGN,\n"
+	"PDN_NODE_ALIAS), then these options. See pdn/linmail-pdn.conf.example.\n";
 
 static struct option long_options[] =
 {
 	{"datadir", required_argument, 0, 'd'},
+	{"config", required_argument, 0, 'f'},
 	{"logdir", required_argument, 0, 'l'},
 	{"rhp", required_argument, 0, 'r'},
 	{"call", required_argument, 0, 'c'},
+	{"alias", required_argument, 0, 'a'},
 	{"node", required_argument, 0, 'n'},
 	{"portmap", required_argument, 0, 'm'},
 	{"defport", required_argument, 0, 'p'},
@@ -345,20 +352,23 @@ static struct option long_options[] =
 	{NULL, no_argument, NULL, 0}
 };
 
-static void EnvCopy(char * To, int Max, char * Name)
-{
-	char * Value = getenv(Name);
+static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:th";
 
-	if (Value && Value[0])
-	{
-		strncpy(To, Value, Max - 1);
-		To[Max - 1] = 0;
-	}
+static char LogDirOption[260] = "";
+
+static void Copy(char * To, int Max, const char * Value)
+{
+	strncpy(To, Value, Max - 1);
+	To[Max - 1] = 0;
 }
 
-static void SetRHP(char * Arg)
+static void SetRHP(const char * Arg)
 {
-	char * Port = strrchr(Arg, ':');
+	char Host[128];
+	char * Port;
+
+	Copy(Host, sizeof(Host), Arg);
+	Port = strrchr(Host, ':');
 
 	if (Port)
 	{
@@ -366,8 +376,139 @@ static void SetRHP(char * Arg)
 		PdnCfg.RHPPort = atoi(Port);
 	}
 
-	if (Arg[0])
-		strncpy(PdnCfg.RHPHost, Arg, sizeof(PdnCfg.RHPHost) - 1);
+	if (Host[0])
+		Copy(PdnCfg.RHPHost, sizeof(PdnCfg.RHPHost), Host);
+}
+
+//	One place that knows every setting, whether it comes from the settings
+//	file, the environment or the command line. Returns FALSE for an unknown key.
+
+static int SetOption(const char * Key, const char * Value)
+{
+	if (_stricmp(Key, "rhp") == 0)
+		SetRHP(Value);
+	else if (_stricmp(Key, "rhp_host") == 0)
+		Copy(PdnCfg.RHPHost, sizeof(PdnCfg.RHPHost), Value);
+	else if (_stricmp(Key, "rhp_port") == 0)
+		PdnCfg.RHPPort = atoi(Value);
+	else if (_stricmp(Key, "rhp_user") == 0)
+		Copy(PdnCfg.RHPUser, sizeof(PdnCfg.RHPUser), Value);
+	else if (_stricmp(Key, "rhp_pass") == 0)
+		Copy(PdnCfg.RHPPass, sizeof(PdnCfg.RHPPass), Value);
+	else if (_stricmp(Key, "call") == 0)
+		Copy(PdnCfg.AppCall, sizeof(PdnCfg.AppCall), Value);
+	else if (_stricmp(Key, "alias") == 0)
+		Copy(PdnCfg.Aliases, sizeof(PdnCfg.Aliases), Value);
+	else if (_stricmp(Key, "node") == 0)
+		Copy(PdnCfg.NodeCall, sizeof(PdnCfg.NodeCall), Value);
+	else if (_stricmp(Key, "node_alias") == 0)
+		Copy(PdnCfg.NodeAlias, sizeof(PdnCfg.NodeAlias), Value);
+	else if (_stricmp(Key, "portmap") == 0)
+	{
+		PdnCfg.PortCount = 0;
+		PdnParsePortMap((char *)Value);
+	}
+	else if (_stricmp(Key, "default_port") == 0)
+		Copy(PdnCfg.DefaultPort, sizeof(PdnCfg.DefaultPort), Value);
+	else if (_stricmp(Key, "linger") == 0)
+		PdnCfg.DiscLinger = atoi(Value);
+	else if (_stricmp(Key, "trace") == 0)
+		PdnCfg.Trace = atoi(Value);
+	else if (_stricmp(Key, "logdir") == 0)
+		Copy(LogDirOption, sizeof(LogDirOption), Value);
+	else
+		return FALSE;
+
+	return TRUE;
+}
+
+static int LoadSettingsFile(char * FileName, int Required)
+{
+	// key = value lines. # starts a comment.
+
+	FILE * Handle = fopen(FileName, "r");
+	char Line[512];
+	int LineNo = 0;
+
+	if (Handle == NULL)
+	{
+		if (Required)
+		{
+			printf("linmail-pdn: cannot open settings file %s\n", FileName);
+			return FALSE;
+		}
+		return TRUE;
+	}
+
+	printf("linmail-pdn: settings from %s\n", FileName);
+
+	while (fgets(Line, sizeof(Line), Handle))
+	{
+		char * Key = Line, * Value, * End;
+
+		LineNo++;
+		strlop(Line, '#');
+
+		while (*Key == ' ' || *Key == '\t')
+			Key++;
+
+		Value = strchr(Key, '=');
+
+		if (Value == NULL)
+		{
+			if (strspn(Key, " \t\r\n") != strlen(Key))
+				printf("linmail-pdn: %s line %d not understood\n", FileName, LineNo);
+			continue;
+		}
+
+		*(Value++) = 0;
+
+		// Trim both sides
+
+		End = Key + strlen(Key);
+		while (End > Key && (End[-1] == ' ' || End[-1] == '\t'))
+			*(--End) = 0;
+
+		while (*Value == ' ' || *Value == '\t')
+			Value++;
+
+		End = Value + strlen(Value);
+		while (End > Value && (End[-1] == ' ' || End[-1] == '\t' || End[-1] == '\r' || End[-1] == '\n'))
+			*(--End) = 0;
+
+		if (!SetOption(Key, Value))
+			printf("linmail-pdn: %s line %d: unknown setting %s\n", FileName, LineNo, Key);
+	}
+
+	fclose(Handle);
+	return TRUE;
+}
+
+static void EnvOption(char * Name, char * Key)
+{
+	char * Value = getenv(Name);
+
+	if (Value && Value[0])
+		SetOption(Key, Value);
+}
+
+static int ArgOption(int c, char * Arg)
+{
+	switch (c)
+	{
+	case 'l': return SetOption("logdir", Arg);
+	case 'r': return SetOption("rhp", Arg);
+	case 'c': return SetOption("call", Arg);
+	case 'a': return SetOption("alias", Arg);
+	case 'n': return SetOption("node", Arg);
+	case 'm': return SetOption("portmap", Arg);
+	case 'p': return SetOption("default_port", Arg);
+	case 'L': return SetOption("linger", Arg);
+	case 'u': return SetOption("rhp_user", Arg);
+	case 'w': return SetOption("rhp_pass", Arg);
+	case 't': return SetOption("trace", "1");
+	}
+	return TRUE;
 }
 
 int main(int argc, char * argv[])
@@ -377,8 +518,7 @@ int main(int argc, char * argv[])
 	struct stat STAT;
 	char LogDir[260] = "";
 	char DataDir[260] = "";
-	char * PortMap = getenv("PDN_LINMAIL_PORTMAP");
-	char * Env;
+	char SettingsFile[300] = "";
 	uint64_t NextTick;
 	int i, c;
 
@@ -403,58 +543,73 @@ int main(int argc, char * argv[])
 
 	initUTF8();
 
-	// Defaults, then environment (as set by the pdn app supervisor), then arguments
+	// Defaults, then the settings file, then the environment (as set by the
+	// pdn app supervisor), then the command line
 
 	strcpy(PdnCfg.RHPHost, "127.0.0.1");
 	PdnCfg.RHPPort = 9000;
 	PdnCfg.DiscLinger = 10;
 
-	EnvCopy(PdnCfg.RHPHost, sizeof(PdnCfg.RHPHost), "PDN_RHP_HOST");
+	// First pass: only the data directory, the settings file and help
 
-	if ((Env = getenv("PDN_RHP_PORT")) && atoi(Env))
-		PdnCfg.RHPPort = atoi(Env);
-
-	EnvCopy(PdnCfg.AppCall, sizeof(PdnCfg.AppCall), "PDN_APP_CALLSIGN");
-	EnvCopy(PdnCfg.NodeCall, sizeof(PdnCfg.NodeCall), "PDN_NODE_CALLSIGN");
-	EnvCopy(PdnCfg.NodeAlias, sizeof(PdnCfg.NodeAlias), "PDN_NODE_ALIAS");
-	EnvCopy(PdnCfg.RHPUser, sizeof(PdnCfg.RHPUser), "PDN_RHP_USER");
-	EnvCopy(PdnCfg.RHPPass, sizeof(PdnCfg.RHPPass), "PDN_RHP_PASS");
-	EnvCopy(PdnCfg.DefaultPort, sizeof(PdnCfg.DefaultPort), "PDN_LINMAIL_DEFAULTPORT");
-	EnvCopy(DataDir, sizeof(DataDir), "PDN_APP_STATE");
-
-	while ((c = getopt_long(argc, argv, "d:l:r:c:n:m:p:L:u:w:th", long_options, NULL)) != -1)
+	while ((c = getopt_long(argc, argv, OptString, long_options, NULL)) != -1)
 	{
 		switch (c)
 		{
-		case 'd': strncpy(DataDir, optarg, 259); break;
-		case 'l': strncpy(LogDir, optarg, 259); break;
-		case 'r': SetRHP(optarg); break;
-		case 'c': strncpy(PdnCfg.AppCall, optarg, 9); break;
-		case 'n': strncpy(PdnCfg.NodeCall, optarg, 9); break;
-		case 'm': PortMap = optarg; break;
-		case 'p': strncpy(PdnCfg.DefaultPort, optarg, 31); break;
-		case 'L': PdnCfg.DiscLinger = atoi(optarg); break;
-		case 'u': strncpy(PdnCfg.RHPUser, optarg, 63); break;
-		case 'w': strncpy(PdnCfg.RHPPass, optarg, 63); break;
-		case 't': PdnCfg.Trace = 1; break;
+		case 'd': Copy(DataDir, sizeof(DataDir), optarg); break;
+		case 'f': Copy(SettingsFile, sizeof(SettingsFile), optarg); break;
 		case 'h':
-		default:
 			printf("%s", HelpScreen);
-			return c == 'h' ? 0 : 1;
+			return 0;
+		case '?':
+			printf("%s", HelpScreen);
+			return 1;
 		}
 	}
 
-	if (PortMap)
-		PdnParsePortMap(PortMap);
-
-	_strupr(PdnCfg.AppCall);
-	_strupr(PdnCfg.NodeCall);
-	_strupr(PdnCfg.NodeAlias);
+	if (DataDir[0] == 0 && getenv("PDN_APP_STATE"))
+		Copy(DataDir, sizeof(DataDir), getenv("PDN_APP_STATE"));
 
 	if (DataDir[0])
 		strcpy(BPQDirectory, DataDir);
+	else if (getcwd(BPQDirectory, 256) == NULL)
+		strcpy(BPQDirectory, ".");
+
+	if (SettingsFile[0])
+	{
+		if (!LoadSettingsFile(SettingsFile, TRUE))
+			return 1;
+	}
 	else
-		getcwd(BPQDirectory, 256);
+	{
+		snprintf(SettingsFile, sizeof(SettingsFile), "%s/linmail-pdn.conf", BPQDirectory);
+		LoadSettingsFile(SettingsFile, FALSE);
+	}
+
+	EnvOption("PDN_RHP_HOST", "rhp_host");
+	EnvOption("PDN_RHP_PORT", "rhp_port");
+	EnvOption("PDN_RHP_USER", "rhp_user");
+	EnvOption("PDN_RHP_PASS", "rhp_pass");
+	EnvOption("PDN_APP_CALLSIGN", "call");
+	EnvOption("PDN_NODE_CALLSIGN", "node");
+	EnvOption("PDN_NODE_ALIAS", "node_alias");
+	EnvOption("PDN_LINMAIL_PORTMAP", "portmap");
+	EnvOption("PDN_LINMAIL_DEFAULTPORT", "default_port");
+
+	// Second pass: everything else
+
+	optind = 0;
+
+	while ((c = getopt_long(argc, argv, OptString, long_options, NULL)) != -1)
+		ArgOption(c, optarg);
+
+	_strupr(PdnCfg.AppCall);
+	_strupr(PdnCfg.Aliases);
+	_strupr(PdnCfg.NodeCall);
+	_strupr(PdnCfg.NodeAlias);
+
+	if (LogDirOption[0])
+		strcpy(LogDir, LogDirOption);
 
 	strcpy(ConfigDirectory, BPQDirectory);
 	strcpy(LogDirectory, LogDir[0] ? LogDir : (char *)BPQDirectory);
@@ -607,8 +762,24 @@ int main(int argc, char * argv[])
 		Disconnect(conn->BPQStream);
 	}
 
-	InitialiseTCP();
-	InitialiseNNTP();
+	// The SMTP, POP3 and NNTP servers are not part of linmail-pdn. Start the
+	// TCP code with their ports zeroed so no listener opens, then put the
+	// values back so linmail.cfg is saved unchanged.
+	{
+		int SavedSMTP = SMTPInPort, SavedPOP3 = POP3InPort, SavedNNTP = NNTPInPort;
+
+		if (SMTPInPort || POP3InPort || NNTPInPort)
+			printf("linmail-pdn: SMTP, POP3 and NNTP servers are not supported - ignoring their ports in linmail.cfg\n");
+
+		SMTPInPort = POP3InPort = NNTPInPort = 0;
+
+		InitialiseTCP();
+		InitialiseNNTP();
+
+		SMTPInPort = SavedSMTP;
+		POP3InPort = SavedPOP3;
+		NNTPInPort = SavedNNTP;
+	}
 
 	SetupListenSet();		// Master set of listening sockets
 

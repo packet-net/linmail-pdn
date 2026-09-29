@@ -18,6 +18,7 @@ struct PdnConfig
 	char RHPUser[64];			// optional RHP auth (PDN_RHP_USER / PDN_RHP_PASS)
 	char RHPPass[64];
 	char AppCall[10];			// Callsign the BBS answers to (PDN_APP_CALLSIGN)
+	char Aliases[64];			// More callsigns to answer to, such as BBS
 	char NodeCall[10];			// pdn node callsign, used in synthesised node replies
 	char NodeAlias[10];			// optional node alias for the same
 	char DefaultPort[32];		// Port label for "C CALL" with no port (empty = none)

@@ -72,7 +72,8 @@ struct PdnStream
 	int Incoming;
 	int TxOutstanding;			// sends not yet answered by sendReply
 	time_t LastTx;
-	int IdleTime;
+	time_t LastActivity;		// Last data either way, for the idle timeout
+	int IdleTime;				// Seconds, as set by ChangeSessionIdletime. 0 = none
 	char Remote[16];
 	char PortLabel[32];
 	struct PdnBuf * RxHead;
@@ -108,10 +109,58 @@ static time_t RHPRetryAt = 0;
 static int RHPWasUp = 0;
 static int NextId = 1;
 
-static int ListenHandle = 0;
-static int ListenState = 0;		// 0 none, 1 socket sent, 2 bind sent, 3 listen sent, 4 listening
-static int ListenReqId = 0;
-static time_t ListenRetryAt = 0;
+// Listeners: the BBS callsign, then any aliases (such as BBS)
+
+#define PDN_MAXLISTEN 4
+
+struct PdnListener
+{
+	char Call[10];
+	int Handle;
+	int State;					// 0 none, 1 socket sent, 2 bind sent, 3 listen sent, 4 listening
+	int ReqId;					// id of the outstanding socket/bind/listen
+	time_t RetryAt;
+};
+
+static struct PdnListener Listeners[PDN_MAXLISTEN];
+static int ListenerCount = 0;
+
+// One datagram socket for UI frames (mail-for beacons, FBB header broadcasts)
+
+#define PDN_MAXUIQ 16
+
+struct PdnUI
+{
+	char Port[32];
+	char Local[10];
+	char Remote[10];
+	int Len;
+	UCHAR Data[256];
+};
+
+static int UiHandle = 0;
+static int UiOpenId = 0;
+static struct PdnUI UiQueue[PDN_MAXUIQ];
+static int UiQueueLen = 0;
+
+// Inbound connects waiting for a free stream
+
+#define PDN_MAXPENDING 8
+
+struct PdnPending
+{
+	int Child;
+	char Remote[16];
+	char Local[10];
+	char Port[32];
+	time_t Since;
+	UCHAR * Buf;				// Data that arrived before the stream was free
+	int BufLen;
+};
+
+static struct PdnPending Pending[PDN_MAXPENDING];
+
+static void AttachPending();
 
 static UCHAR RxFrame[65536 + 2];
 static int RxFrameLen = 0;
@@ -301,7 +350,12 @@ static int RHPSend(json_t * Msg)
 	memcpy(&Frame[2], Text, Len);
 
 	if (PdnCfg.Trace)
-		printf("linmail-pdn: RHP > %s\n", Text);
+	{
+		if (strncmp(Text, "{\"type\":\"auth\",", 15) == 0)
+			printf("linmail-pdn: RHP > {\"type\":\"auth\", password not shown}\n");
+		else
+			printf("linmail-pdn: RHP > %s\n", Text);
+	}
 	free(Text);
 
 	Len += 2;
@@ -442,6 +496,8 @@ static void QueueRx(int n, char * Msg, int Len)
 
 	struct PdnStream * STREAM = &Streams[n];
 
+	STREAM->LastActivity = time(NULL);
+
 	while (Len > 0)
 	{
 		struct PdnBuf * Buf = malloc(sizeof(struct PdnBuf));
@@ -477,6 +533,8 @@ static void StartSession(int n, char * Local)
 
 	BPQHOSTVECTOR[n].HOSTSESSION = L4;
 	BPQHOSTVECTOR[n].HOSTFLAGS |= 1;		// State change
+
+	Streams[n].LastActivity = time(NULL);
 }
 
 static void EndSession(int n)
@@ -788,80 +846,168 @@ static const char * ErrText(json_t * Msg)
 	return Text;
 }
 
-static void StartListen()
+static void StartListen(struct PdnListener * LISTEN)
 {
 	json_t * Msg;
 
-	if (PdnCfg.AppCall[0] == 0)
-		return;
-
-	Msg = NewRequest("socket", &ListenReqId);
+	Msg = NewRequest("socket", &LISTEN->ReqId);
 	json_object_set_new(Msg, "pfam", json_string("ax25"));
 	json_object_set_new(Msg, "mode", json_string("stream"));
-	ListenState = 1;
+	LISTEN->State = 1;
+	LISTEN->RetryAt = 0;
 	RHPSend(Msg);
 }
 
-static void ListenFailed(json_t * Msg, char * Step)
+static void ListenFailed(struct PdnListener * LISTEN, json_t * Msg, char * Step)
 {
-	PdnLog("RHP %s for %s failed: %d %s - retrying in 30 seconds", Step, PdnCfg.AppCall, ErrCode(Msg), ErrText(Msg));
+	PdnLog("RHP %s for %s failed: %d %s - retrying in 30 seconds", Step, LISTEN->Call, ErrCode(Msg), ErrText(Msg));
 
-	if (ListenHandle)
-		RHPClose(ListenHandle);
+	if (LISTEN->Handle)
+		RHPClose(LISTEN->Handle);
 
-	ListenHandle = 0;
-	ListenState = 0;
-	ListenRetryAt = time(NULL) + 30;
+	LISTEN->Handle = 0;
+	LISTEN->State = 0;
+	LISTEN->RetryAt = time(NULL) + 30;
 }
 
-static void ProcessListenReply(char * Type, json_t * Msg)
+static int ProcessListenReply(char * Type, json_t * Msg)
 {
+	// Returns TRUE if the reply belonged to a listener
+
+	struct PdnListener * LISTEN = NULL;
+	int Id = GetInt(Msg, "id");
 	json_t * Req;
+	int i;
+
+	for (i = 0; i < ListenerCount; i++)
+	{
+		if (Listeners[i].State >= 1 && Listeners[i].State <= 3 && Listeners[i].ReqId == Id)
+			LISTEN = &Listeners[i];
+	}
+
+	if (LISTEN == NULL)
+		return FALSE;
 
 	if (strcmp(Type, "socketReply") == 0)
 	{
 		if (ErrCode(Msg))
 		{
-			ListenFailed(Msg, "socket");
-			return;
+			ListenFailed(LISTEN, Msg, "socket");
+			return TRUE;
 		}
-		ListenHandle = GetInt(Msg, "handle");
+		LISTEN->Handle = GetInt(Msg, "handle");
 
-		Req = NewRequest("bind", &ListenReqId);
-		json_object_set_new(Req, "handle", json_integer(ListenHandle));
-		json_object_set_new(Req, "local", json_string(PdnCfg.AppCall));
+		Req = NewRequest("bind", &LISTEN->ReqId);
+		json_object_set_new(Req, "handle", json_integer(LISTEN->Handle));
+		json_object_set_new(Req, "local", json_string(LISTEN->Call));
 		json_object_set_new(Req, "port", json_null());		// All ports
-		ListenState = 2;
+		LISTEN->State = 2;
 		RHPSend(Req);
-		return;
+		return TRUE;
 	}
 
 	if (strcmp(Type, "bindReply") == 0)
 	{
 		if (ErrCode(Msg))
 		{
-			ListenFailed(Msg, "bind");
-			return;
+			ListenFailed(LISTEN, Msg, "bind");
+			return TRUE;
 		}
 
-		Req = NewRequest("listen", &ListenReqId);
-		json_object_set_new(Req, "handle", json_integer(ListenHandle));
+		Req = NewRequest("listen", &LISTEN->ReqId);
+		json_object_set_new(Req, "handle", json_integer(LISTEN->Handle));
 		json_object_set_new(Req, "flags", json_integer(0));
-		ListenState = 3;
+		LISTEN->State = 3;
 		RHPSend(Req);
-		return;
+		return TRUE;
 	}
 
 	if (strcmp(Type, "listenReply") == 0)
 	{
 		if (ErrCode(Msg))
 		{
-			ListenFailed(Msg, "listen");
-			return;
+			ListenFailed(LISTEN, Msg, "listen");
+			return TRUE;
 		}
-		ListenState = 4;
-		PdnLog("Listening for connects to %s (RHP handle %d)", PdnCfg.AppCall, ListenHandle);
+		LISTEN->State = 4;
+		PdnLog("Listening for connects to %s (RHP handle %d)", LISTEN->Call, LISTEN->Handle);
 	}
+	return TRUE;
+}
+
+//	UI frames go out through one RHP datagram socket, opened when first needed
+
+static void SendUIFrame(struct PdnUI * DG)
+{
+	json_t * Msg;
+	int Id;
+
+	Msg = NewRequest("sendto", &Id);
+	json_object_set_new(Msg, "handle", json_integer(UiHandle));
+	json_object_set_new(Msg, "port", json_string(DG->Port));
+	json_object_set_new(Msg, "local", json_string(DG->Local));
+	json_object_set_new(Msg, "remote", json_string(DG->Remote));
+	json_object_set_new(Msg, "data", BytesToJson(DG->Data, DG->Len));
+	RHPSend(Msg);
+}
+
+static void QueueUIFrame(char * Port, char * Local, char * Remote, UCHAR * Data, int Len)
+{
+	struct PdnUI DG;
+
+	if (RHPSock == -1)
+		return;
+
+	if (Len > 256)
+		Len = 256;
+
+	strncpy(DG.Port, Port, 31);
+	DG.Port[31] = 0;
+	strcpy(DG.Local, Local);
+	strcpy(DG.Remote, Remote);
+	memcpy(DG.Data, Data, Len);
+	DG.Len = Len;
+
+	if (UiHandle)
+	{
+		SendUIFrame(&DG);
+		return;
+	}
+
+	if (UiQueueLen < PDN_MAXUIQ)
+		UiQueue[UiQueueLen++] = DG;
+
+	if (UiOpenId == 0)
+	{
+		json_t * Msg = NewRequest("open", &UiOpenId);
+
+		json_object_set_new(Msg, "pfam", json_string("ax25"));
+		json_object_set_new(Msg, "mode", json_string("dgram"));
+		json_object_set_new(Msg, "local", json_string(PdnCfg.AppCall));
+		json_object_set_new(Msg, "flags", json_integer(0));
+		RHPSend(Msg);
+	}
+}
+
+static void ProcessUIOpenReply(json_t * Msg)
+{
+	int i;
+
+	UiOpenId = 0;
+
+	if (ErrCode(Msg))
+	{
+		PdnLog("RHP datagram socket for UI frames failed: %d %s", ErrCode(Msg), ErrText(Msg));
+		UiQueueLen = 0;
+		return;
+	}
+
+	UiHandle = GetInt(Msg, "handle");
+
+	for (i = 0; i < UiQueueLen; i++)
+		SendUIFrame(&UiQueue[i]);
+
+	UiQueueLen = 0;
 }
 
 static void ProcessOpenReply(json_t * Msg)
@@ -871,6 +1017,12 @@ static void ProcessOpenReply(json_t * Msg)
 	int Err = ErrCode(Msg);
 	int n, i;
 	struct PdnStream * STREAM;
+
+	if (Id && Id == UiOpenId)
+	{
+		ProcessUIOpenReply(Msg);
+		return;
+	}
 
 	n = FindStreamByOpenId(Id);
 
@@ -908,7 +1060,8 @@ static void ProcessOpenReply(json_t * Msg)
 		STREAM->Mode = PDN_NODECMD;
 
 		// pdn's openReply does not say whether the far end sent DM (busy) or
-		// never answered, so only an explicit "busy" becomes Busy from.
+		// never answered (both are errCode 15; packet.net issue #849), so
+		// only an explicit "busy" becomes Busy from.
 
 		if (strstr(Upper, "BUSY"))
 			NodeReply(n, "Busy from %s\r", STREAM->Remote);
@@ -975,35 +1128,95 @@ static void ProcessAccept(json_t * Msg)
 		return;
 	}
 
-	Remote = Call;
+	// Park it until a stream is free. A stream whose last disconnect the
+	// mail code has not yet seen is not free, so a connect arriving just
+	// after one ends (or just after start-up) waits a tick or two.
 
-	for (n = 0; n < PDN_MAXSTREAMS; n++)
+	for (n = 0; n < PDN_MAXPENDING; n++)
 	{
-		BPQVECSTRUC * SESS = &BPQHOSTVECTOR[n];
+		struct PdnPending * PEND = &Pending[n];
 
-		if ((SESS->HOSTFLAGS & 0x80) && SESS->HOSTAPPLMASK && SESS->HOSTSESSION == NULL
-			&& (SESS->HOSTFLAGS & 3) == 0 && Streams[n].Mode == PDN_IDLE)
+		if (PEND->Child == 0)
 		{
-			struct PdnStream * STREAM = &Streams[n];
-
-			FreeRx(STREAM);
-			STREAM->Mode = PDN_LINKED;
-			STREAM->Handle = Child;
-			STREAM->Incoming = 1;
-			STREAM->TxOutstanding = 0;
-			STREAM->LastTx = 0;
-			strncpy(STREAM->Remote, Remote, 15);
-			strncpy(STREAM->PortLabel, Port, 31);
-
-			StartSession(n, (char *)(Local[0] ? Local : PdnCfg.AppCall));
-
-			PdnLog("Stream %d: incoming connect from %s on port %s (RHP handle %d)", n + 1, Remote, Port, Child);
+			memset(PEND, 0, sizeof(struct PdnPending));
+			PEND->Child = Child;
+			strcpy(PEND->Remote, Call);
+			strncpy(PEND->Local, Local[0] ? Local : PdnCfg.AppCall, 9);
+			strncpy(PEND->Port, Port, 31);
+			PEND->Since = time(NULL);
+			AttachPending();
 			return;
 		}
 	}
 
-	PdnLog("Incoming connect from %s refused - no free BBS streams", Remote);
+	PdnLog("Incoming connect from %s refused - too many connects waiting", Call);
 	RHPClose(Child);
+}
+
+static void AttachPending()
+{
+	int i, n;
+	time_t Now = time(NULL);
+
+	for (i = 0; i < PDN_MAXPENDING; i++)
+	{
+		struct PdnPending * PEND = &Pending[i];
+
+		if (PEND->Child == 0)
+			continue;
+
+		for (n = 0; n < PDN_MAXSTREAMS; n++)
+		{
+			BPQVECSTRUC * SESS = &BPQHOSTVECTOR[n];
+
+			if ((SESS->HOSTFLAGS & 0x80) && SESS->HOSTAPPLMASK && SESS->HOSTSESSION == NULL
+				&& (SESS->HOSTFLAGS & 3) == 0 && Streams[n].Mode == PDN_IDLE)
+			{
+				struct PdnStream * STREAM = &Streams[n];
+
+				FreeRx(STREAM);
+				STREAM->Mode = PDN_LINKED;
+				STREAM->Handle = PEND->Child;
+				STREAM->Incoming = 1;
+				STREAM->TxOutstanding = 0;
+				STREAM->LastTx = 0;
+				strcpy(STREAM->Remote, PEND->Remote);
+				strcpy(STREAM->PortLabel, PEND->Port);
+
+				StartSession(n, PEND->Local);
+
+				PdnLog("Stream %d: incoming connect from %s to %s on port %s (RHP handle %d)",
+					n + 1, PEND->Remote, PEND->Local, PEND->Port, PEND->Child);
+
+				if (PEND->BufLen)
+					QueueRx(n, PEND->Buf, PEND->BufLen);
+
+				free(PEND->Buf);
+				memset(PEND, 0, sizeof(struct PdnPending));
+				break;
+			}
+		}
+
+		if (PEND->Child && Now - PEND->Since > 5)
+		{
+			PdnLog("Incoming connect from %s refused - no free BBS streams", PEND->Remote);
+			RHPClose(PEND->Child);
+			free(PEND->Buf);
+			memset(PEND, 0, sizeof(struct PdnPending));
+		}
+	}
+}
+
+static struct PdnPending * FindPending(int Handle)
+{
+	int i;
+
+	for (i = 0; i < PDN_MAXPENDING; i++)
+	{
+		if (Handle && Pending[i].Child == Handle)
+			return &Pending[i];
+	}
+	return NULL;
 }
 
 static void ProcessRecv(json_t * Msg)
@@ -1014,6 +1227,20 @@ static void ProcessRecv(json_t * Msg)
 	int Len, n;
 
 	n = FindStreamByHandle(Handle);
+
+	if (n < 0 && json_is_string(Data))
+	{
+		struct PdnPending * PEND = FindPending(Handle);
+
+		if (PEND)
+		{
+			int Max = (int)json_string_length(Data) + 1;
+
+			PEND->Buf = realloc(PEND->Buf, PEND->BufLen + Max);
+			PEND->BufLen += JsonToBytes(Data, &PEND->Buf[PEND->BufLen], Max);
+		}
+		return;
+	}
 
 	if (n < 0 || !json_is_string(Data))
 		return;				// Lingering or unknown handle
@@ -1029,13 +1256,33 @@ static void ProcessClosePush(json_t * Msg)
 	int Handle = GetInt(Msg, "handle");
 	int n, i;
 
-	if (Handle == ListenHandle && ListenHandle)
+	for (i = 0; i < ListenerCount; i++)
 	{
-		PdnLog("pdn closed the listener for %s - re-listening in 30 seconds", PdnCfg.AppCall);
-		ListenHandle = 0;
-		ListenState = 0;
-		ListenRetryAt = time(NULL) + 30;
+		if (Listeners[i].Handle && Handle == Listeners[i].Handle)
+		{
+			PdnLog("pdn closed the listener for %s - re-listening in 30 seconds", Listeners[i].Call);
+			Listeners[i].Handle = 0;
+			Listeners[i].State = 0;
+			Listeners[i].RetryAt = time(NULL) + 30;
+			return;
+		}
+	}
+
+	if (Handle && Handle == UiHandle)
+	{
+		UiHandle = 0;
 		return;
+	}
+
+	{
+		struct PdnPending * PEND = FindPending(Handle);
+
+		if (PEND)
+		{
+			free(PEND->Buf);
+			memset(PEND, 0, sizeof(struct PdnPending));
+			return;
+		}
 	}
 
 	for (i = 0; i < PDN_MAXDEFER; i++)
@@ -1102,11 +1349,19 @@ static void ProcessRHPMessage(char * Text, int Len)
 	else if (strcmp(Type, "sendReply") == 0)
 		ProcessSendReply(Msg);
 	else if (strcmp(Type, "socketReply") == 0 || strcmp(Type, "bindReply") == 0 || strcmp(Type, "listenReply") == 0)
-		ProcessListenReply((char *)Type, Msg);
+	{
+		if (!ProcessListenReply((char *)Type, Msg))
+			PdnLog("Unexpected RHP message: %s", Text);
+	}
 	else if (strcmp(Type, "authReply") == 0)
 	{
 		if (ErrCode(Msg))
 			PdnLog("RHP auth failed: %d %s", ErrCode(Msg), ErrText(Msg));
+	}
+	else if (strcmp(Type, "sendtoReply") == 0)
+	{
+		if (ErrCode(Msg))
+			PdnLog("RHP UI frame refused: %d %s", ErrCode(Msg), ErrText(Msg));
 	}
 	else if (strcmp(Type, "status") == 0 || strcmp(Type, "closeReply") == 0)
 	{
@@ -1129,9 +1384,24 @@ static void RHPDown(char * Why)
 
 	RHPSock = -1;
 	RxFrameLen = 0;
-	ListenHandle = 0;
-	ListenState = 0;
 	RHPRetryAt = time(NULL) + 5;
+
+	for (i = 0; i < ListenerCount; i++)
+	{
+		Listeners[i].Handle = 0;
+		Listeners[i].State = 0;
+		Listeners[i].RetryAt = 0;
+	}
+
+	UiHandle = 0;
+	UiOpenId = 0;
+	UiQueueLen = 0;
+
+	for (i = 0; i < PDN_MAXPENDING; i++)
+	{
+		free(Pending[i].Buf);
+		memset(&Pending[i], 0, sizeof(struct PdnPending));
+	}
 
 	for (i = 0; i < PDN_MAXDEFER; i++)
 	{
@@ -1157,7 +1427,7 @@ static void RHPConnect()
 {
 	struct addrinfo Hints = {0}, * Result = NULL;
 	char Port[16];
-	int Sock, One = 1;
+	int Sock, One = 1, i;
 	static int Reported = 0;
 
 	Hints.ai_family = AF_UNSPEC;
@@ -1205,7 +1475,8 @@ static void RHPConnect()
 		RHPSend(Msg);
 	}
 
-	StartListen();
+	for (i = 0; i < ListenerCount; i++)
+		StartListen(&Listeners[i]);
 }
 
 static void RHPRead()
@@ -1248,8 +1519,48 @@ static void RHPRead()
 	}
 }
 
+static void CheckIdle(time_t Now)
+{
+	// BPQ drops a session that has been idle for longer than its idle time
+	// (L4LIMIT). Do the same, through the normal disconnect path.
+
+	int n;
+
+	for (n = 0; n < PDN_MAXSTREAMS; n++)
+	{
+		struct PdnStream * STREAM = &Streams[n];
+
+		if (BPQHOSTVECTOR[n].HOSTSESSION && STREAM->IdleTime > 0
+			&& (STREAM->Mode == PDN_NODECMD || STREAM->Mode == PDN_LINKED)
+			&& Now - STREAM->LastActivity > STREAM->IdleTime)
+		{
+			PdnLog("Stream %d: %s idle for %d seconds - disconnecting", n + 1, STREAM->Remote, STREAM->IdleTime);
+			SessionControl(n + 1, 2, 0);
+		}
+	}
+}
+
+static void AddListener(char * Call)
+{
+	char Copy[16];
+
+	strncpy(Copy, Call, 15);
+	Copy[15] = 0;
+	strlop(Copy, ' ');
+	_strupr(Copy);
+
+	if (Copy[0] == 0 || strlen(Copy) > 9 || ListenerCount >= PDN_MAXLISTEN)
+		return;
+
+	memset(&Listeners[ListenerCount], 0, sizeof(struct PdnListener));
+	strcpy(Listeners[ListenerCount].Call, Copy);
+	ListenerCount++;
+}
+
 void PdnHostInit()
 {
+	char * Aliases, * Context, * Alias;
+
 	pthread_mutexattr_t Attr;
 
 	pthread_mutexattr_init(&Attr);
@@ -1258,6 +1569,18 @@ void PdnHostInit()
 
 	memset(Streams, 0, sizeof(Streams));
 	memset(BPQHOSTVECTOR, 0, sizeof(BPQHOSTVECTOR));
+
+	AddListener(PdnCfg.AppCall);
+
+	Aliases = _strdup(PdnCfg.Aliases);
+	Alias = strtok_s(Aliases, ", ", &Context);
+
+	while (Alias)
+	{
+		AddListener(Alias);
+		Alias = strtok_s(NULL, ", ", &Context);
+	}
+	free(Aliases);
 
 	pthread_mutex_lock(&PdnLock);
 	RHPConnect();
@@ -1278,11 +1601,14 @@ void PdnHostPoll(int WaitMs)
 	if (RHPSock == -1 && Now >= RHPRetryAt)
 		RHPConnect();
 
-	if (RHPSock != -1 && ListenState == 0 && ListenRetryAt && Now >= ListenRetryAt)
+	for (i = 0; RHPSock != -1 && i < ListenerCount; i++)
 	{
-		ListenRetryAt = 0;
-		StartListen();
+		if (Listeners[i].State == 0 && Listeners[i].RetryAt && Now >= Listeners[i].RetryAt)
+			StartListen(&Listeners[i]);
 	}
+
+	CheckIdle(Now);
+	AttachPending();
 
 	// Close handles whose linger has expired
 
@@ -1332,8 +1658,14 @@ void PdnHostClose()
 			RHPClose(Streams[n].Handle);
 	}
 
-	if (ListenHandle)
-		RHPClose(ListenHandle);
+	for (n = 0; n < ListenerCount; n++)
+	{
+		if (Listeners[n].Handle)
+			RHPClose(Listeners[n].Handle);
+	}
+
+	if (UiHandle)
+		RHPClose(UiHandle);
 
 	if (RHPSock != -1)
 		close(RHPSock);
@@ -1578,6 +1910,7 @@ DllExport int APIENTRY SendMsg(int stream, char * msg, int len)
 	pthread_mutex_lock(&PdnLock);
 
 	STREAM = &Streams[n];
+	STREAM->LastActivity = time(NULL);
 
 	switch (STREAM->Mode)
 	{
@@ -1722,7 +2055,55 @@ DllExport uint64_t APIENTRY GetPortFrequency(int PortNo, char * FreqString)
 
 DllExport int APIENTRY SendRaw(int port, char * msg, int len)
 {
-	// UI frames (mail-for beacons, FBB UI headers) - not carried over RHP yet
+	// A raw AX.25 frame from UIRoutines.c (mail-for beacons, FBB message
+	// header broadcasts): DEST, ORIGIN, any digis, CTL, PID, info. Sent as an
+	// RHP datagram. RHP has no digipeater path, so any digis are dropped.
+
+	UCHAR * Frame = (UCHAR *)msg;
+	char Dest[16], Origin[16];
+	char * Label = NULL;
+	int Pos = 14, i;
+	static int DigiWarned = 0;
+
+	if (len < 16)
+		return 0;
+
+	if ((Frame[13] & 1) == 0)
+	{
+		// Skip digis
+
+		while (Pos + 7 <= len && (Frame[Pos + 6] & 1) == 0)
+			Pos += 7;
+
+		Pos += 7;
+
+		if (!DigiWarned++)
+			PdnLog("UI frames are sent without their digipeater path (not supported over RHP)");
+	}
+
+	if (Pos + 2 > len || Frame[Pos] != 3 || Frame[Pos + 1] != 0xF0)
+		return 0;						// Only plain UI frames
+
+	for (i = 0; i < PdnCfg.PortCount; i++)
+	{
+		if (PdnCfg.PortNum[i] == port)
+			Label = PdnCfg.PortLabel[i];
+	}
+
+	if (Label == NULL && port >= 1 && port <= PdnCfg.PortCount)
+		Label = PdnCfg.PortLabel[port - 1];		// Port slot
+
+	if (Label == NULL)
+		return 0;
+
+	ConvFromAX25(Frame, Dest);
+	strlop(Dest, ' ');
+	ConvFromAX25(&Frame[7], Origin);
+	strlop(Origin, ' ');
+
+	pthread_mutex_lock(&PdnLock);
+	QueueUIFrame(Label, Origin, Dest, &Frame[Pos + 2], len - Pos - 2);
+	pthread_mutex_unlock(&PdnLock);
 
 	return 0;
 }
