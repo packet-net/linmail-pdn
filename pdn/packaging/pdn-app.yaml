@@ -1,0 +1,36 @@
+# pdn-app.yaml - the LinBPQ Mail app package manifest (packet.net docs/app-packages.md).
+#
+# linmail-pdn is the LinBPQ mail server (G8BPQ's BPQMail) running as a pdn app.
+# It reaches the node only through public interfaces: RHPv2 for the packet
+# plane (it binds the callsign the node gives it in PDN_APP_CALLSIGN) and the
+# app gateway for webmail and the management pages.
+#
+# State (linmail.cfg, the mail files, linmail-pdn.conf) lives in the app state
+# dir, /var/lib/packetnet/apps/linmail. On first start with no linmail.cfg a
+# default one is written, with the BBS name taken from the app callsign. To
+# move an existing LinBPQ mailbox across, see MIGRATING.md.
+manifest: 1
+id: linmail                   # must equal the package directory name
+name: LinBPQ Mail
+version: "@VERSION@"
+description: The LinBPQ mail BBS (BPQMail) as a pdn app - personal mail, bulletins, FBB B1/B2 forwarding with LinBPQ and other BBSes, and webmail.
+icon: mail
+capabilities: [packet, web]   # binds its own callsign over RHPv2; serves its own web pages
+
+# The node-prompt verb. MAIL rather than BBS so it does not collide with
+# pdn-bbs; the node owner can change it (apps[].command in packetnet.yaml).
+packet:
+  command: MAIL
+
+# The daemon pdn supervises while the app is enabled.
+service:
+  command: ./linmail-pdn      # relative - resolves to the binary in this package dir
+  environment: {}             # PDN_APP_STATE, PDN_APP_DIR, PDN_APP_CALLSIGN, PDN_RHP_HOST/PORT come from the supervisor
+
+# Webmail and the management pages, reverse-proxied by pdn at /apps/linmail/.
+# The port must match web_port in linmail-pdn.conf (default 18095).
+ui:
+  upstream: http://127.0.0.1:18095
+  name: LinBPQ Mail
+  icon: mail
+  mode: embedded

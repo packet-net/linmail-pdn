@@ -1,9 +1,11 @@
 name: linmail-pdn
 
 # Builds linmail-pdn (the mail server as a standalone packet.net app, see
-# pdn/PLAN.md) and runs its tests: the fake RHP server suite, then one run
+# pdn/PLAN.md) and runs its tests: the fake RHP server and web suites, runs
 # against a real pdn node from the latest packet.net release and a LinBPQ
-# built from this tree.
+# built from this tree (including pdn starting the app package and serving
+# its pages through the app gateway), and finally installs the amd64 .deb and
+# runs that against a real pdn.
 
 on:
   push:
@@ -24,6 +26,7 @@ on:
       - 'lzhuf32.c'
       - 'Housekeeping.c'
       - 'UIRoutines.c'
+      - 'HTML/**'
       - 'utf8Routines.c'
       - 'compatbits.c'
       - '*.h'
@@ -78,13 +81,25 @@ jobs:
           tar xzf "$RUNNER_TEMP/pdn/packetnet_amd64.tar.gz" -C "$RUNNER_TEMP/pdn" ./packetnet
           echo "PDN_BIN=$RUNNER_TEMP/pdn/packetnet" >> "$GITHUB_ENV"
 
-      - name: Tests against a fake RHP server
-        run: python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --junitxml=reports/linmail-pdn-fake.xml
+      - name: Tests against a fake RHP server, and the web pages
+        run: |
+          python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --ignore=pdn/tests/test_deb.py \
+            --junitxml=reports/linmail-pdn-fake.xml
 
-      - name: Test against a real pdn node and LinBPQ
+      - name: Tests against a real pdn node and LinBPQ
         env:
           LINBPQ_BIN: ${{ github.workspace }}/linbpq
         run: python3 -m pytest pdn/tests/test_real_pdn.py -v -s --junitxml=reports/linmail-pdn-real.xml
+
+      - name: Build the amd64 .deb (Debian bookworm container)
+        run: pdn/packaging/build-in-docker.sh amd64 0.0.0~ci${{ github.run_number }}
+
+      - name: Install the .deb and run it against a real pdn node
+        env:
+          LINBPQ_BIN: ${{ github.workspace }}/linbpq
+        run: |
+          export LINMAIL_PDN_DEB=$(ls "$PWD"/pdn/dist/pdn-linmail_*_amd64.deb)
+          python3 -m pytest pdn/tests/test_deb.py -v -s --junitxml=reports/linmail-pdn-deb.xml
 
       - name: Upload test reports
         if: always()

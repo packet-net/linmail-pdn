@@ -1,0 +1,16 @@
+Package: pdn-linmail
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Tom Fanning <tom@m0lte.uk>
+Depends: libc6 (>= 2.36)
+Recommends: packetnet
+Section: misc
+Priority: optional
+Homepage: https://github.com/M0LTE/linbpq
+Description: LinBPQ mail BBS app package for the Packet.NET node (pdn)
+ The LinBPQ mail server (G8BPQ's BPQMail) built on its own and connected to a
+ Packet.NET node over RHPv2: personal mail, bulletins, FBB B1/B2 forwarding
+ and webmail through the node's control panel. Ships as a Packet.NET app
+ PACKAGE: pdn discovers it under /usr/share/packetnet/apps/linmail and the node
+ owner enables it from the control panel. Inert without the packetnet node
+ host (hence the soft Recommends), but installable standalone.
