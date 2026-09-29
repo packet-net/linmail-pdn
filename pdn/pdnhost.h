@@ -22,7 +22,6 @@ struct PdnConfig
 	char NodeCall[10];			// pdn node callsign, used in synthesised node replies
 	char NodeAlias[10];			// optional node alias for the same
 	char DefaultPort[32];		// Port label for "C CALL" with no port (empty = none)
-	int DiscLinger;				// Seconds to hold an RHP close after our last send
 	int Trace;					// Print RHP traffic to stdout
 	int PortCount;
 	int PortNum[PDN_MAXPORTMAP];	// BPQ-style port number used in connect scripts

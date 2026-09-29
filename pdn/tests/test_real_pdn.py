@@ -7,7 +7,8 @@ pdn (N0PDN) has one AXUDP port, "bpq", to the LinBPQ node (N0BPQ, BBS
 N0BPQ-1). linmail-pdn (BBS N0LMB) reaches pdn over RHPv2. A user logs in to
 LinBPQ, connects to N0LMB through pdn and posts, lists and reads a message;
 then one message is forwarded each way between the two BBSes with FBB B2
-compression.
+compression. Over a slowed-down link, the end of a long message still reaches
+LinBPQ when the BBS hangs up straight after sending it.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import signal
 import socket
 import subprocess
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -328,6 +330,229 @@ def test_real_pdn_rhp_auth(tmp_path):
                 p.wait(15)
             except subprocess.TimeoutExpired:
                 p.kill()
+
+
+class SlowLink:
+    """A UDP relay between pdn's AXUDP port and LinBPQ's that holds every
+    datagram for `delay` seconds before passing it on, in order, like a slow
+    radio channel. Each side sees the other at the address it is configured
+    with: pdn sends to and hears from `pdn_side`, LinBPQ to and from
+    `bpq_side`."""
+
+    def __init__(self, pdn_udp: int, bpq_udp: int):
+        self.delay = 0.0
+        self.pdn_addr = ("127.0.0.1", pdn_udp)
+        self.bpq_addr = ("127.0.0.1", bpq_udp)
+        self.a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.a.bind(("127.0.0.1", 0))
+        self.b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.b.bind(("127.0.0.1", 0))
+        self.pdn_side = self.a.getsockname()[1]
+        self.bpq_side = self.b.getsockname()[1]
+        self.running = True
+        self.threads = [threading.Thread(target=self._pump, args=(self.a, self.b, self.bpq_addr), daemon=True),
+                        threading.Thread(target=self._pump, args=(self.b, self.a, self.pdn_addr), daemon=True)]
+        for t in self.threads:
+            t.start()
+
+    def _pump(self, rx: socket.socket, tx: socket.socket, to):
+        import queue
+        q: queue.Queue = queue.Queue()
+
+        def deliver():
+            while self.running:
+                try:
+                    due, data = q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                wait = due - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    tx.sendto(data, to)
+                except OSError:
+                    return
+
+        threading.Thread(target=deliver, daemon=True).start()
+        rx.settimeout(0.2)
+        while self.running:
+            try:
+                data, _ = rx.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            q.put((time.monotonic() + self.delay, data))
+
+    def close(self):
+        self.running = False
+        for t in self.threads:
+            t.join(2)
+        self.a.close()
+        self.b.close()
+
+
+# The first pdn node release after 0.57.0 has packet.net#852 (the fix for
+# packet.net#850): closing an RHP handle keeps the AX.25 link up until the
+# peer has everything already sent, then disconnects. 0.57.0 and earlier
+# disconnect at once and throw the rest away.
+LAST_PDN_WITHOUT_GRACEFUL_CLOSE = (0, 57, 0)
+
+
+def pdn_version(http_port: int) -> str:
+    with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/api/v1/status", timeout=30) as r:
+        return json.loads(r.read())["version"]
+
+
+def has_graceful_close(version: str) -> bool:
+    """True for a pdn that holds the disconnect until sent data is acknowledged.
+    A version that isn't a plain release number (a build from source) is taken
+    to have it."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    return not m or tuple(int(x) for x in m.groups()) > LAST_PDN_WITHOUT_GRACEFUL_CLOSE
+
+
+# A slow link: pdn sends one frame, then waits for LinBPQ's acknowledgement,
+# which takes at least 0.8 seconds to come back through the relay. A 4 KB
+# message then takes well over ten seconds to get across, and the mail code
+# closes the session 2 seconds after its last send.
+SLOW_PDN_YAML = PDN_YAML.replace("    link:\n", "    ax25:\n      windowSize: 1\n      t1Ms: 3000\n    link:\n")
+SLOW_DELAY = 0.4
+
+
+def test_real_pdn_close_delivers_tail(tmp_path):
+    """The end of a long message and the close straight after it still reach
+    the lab LinBPQ over a slow link. linmail-pdn closes the moment the mail
+    code disconnects, and relies on pdn to finish sending first.
+
+    Needs a pdn with packet.net#852 (the first release after 0.57.0). Skipped
+    for an older pdn unless PDN_GRACEFUL_CLOSE=1, which runs it anyway to show
+    it failing there; PDN_GRACEFUL_CLOSE=0 always skips it."""
+    ports = {k: free_port() for k in ("pdn_telnet", "pdn_http", "rhp", "bpq_telnet", "bpq_http")}
+    bpq_udp, pdn_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
+    link = SlowLink(pdn_udp, bpq_udp)
+
+    pdn_dir, bpq_dir, lm_dir = tmp_path / "pdn", tmp_path / "linbpq", tmp_path / "linmail-pdn"
+    for d in (pdn_dir, bpq_dir, lm_dir):
+        d.mkdir()
+
+    # pdn and LinBPQ each see the other at the relay
+    (pdn_dir / "packetnet.yaml").write_text(
+        SLOW_PDN_YAML.format(require_auth="false", bpq_udp=link.pdn_side, pdn_udp=pdn_udp, **ports))
+    (bpq_dir / "bpq32.cfg").write_text(BPQ32_CFG.format(bpq_udp=bpq_udp, pdn_udp=link.bpq_side, **ports))
+    (bpq_dir / "linmail.cfg").write_text(linmail_cfg(bbs="N0BPQ"))
+    (lm_dir / "linmail.cfg").write_text(linmail_cfg())
+
+    body = [f"Line {i:02d} " + "abcdefghijklmnopqrstuvwxyz0123456789" * 5 for i in range(1, 21)]
+    tail = "TAIL-OF-THE-MESSAGE-END"
+
+    pdn_cmd = ["dotnet", PDN_BIN] if PDN_BIN.endswith(".dll") else [PDN_BIN]
+    procs = []
+    u = None
+    try:
+        procs.append(subprocess.Popen(
+            pdn_cmd + ["--config", str(pdn_dir / "packetnet.yaml"), "--db", str(pdn_dir / "pdn.db")],
+            cwd=pdn_dir, stdin=subprocess.DEVNULL, stdout=open(pdn_dir / "pdn.log", "wb"),
+            stderr=subprocess.STDOUT))
+        wait_port(ports["pdn_http"], 120)
+        version = pdn_version(ports["pdn_http"])
+        print(f"pdn version {version}")
+        choice = os.environ.get("PDN_GRACEFUL_CLOSE", "")
+        if choice == "0" or (choice != "1" and not has_graceful_close(version)):
+            pytest.skip(f"pdn {version} disconnects at once on close, dropping unsent data; "
+                        "needs the first pdn release after 0.57.0 (packet.net#850)")
+
+        procs.append(subprocess.Popen(
+            [LINBPQ_BIN, "mail"], cwd=bpq_dir, stdin=subprocess.DEVNULL,
+            stdout=open(bpq_dir / "linbpq.log", "wb"), stderr=subprocess.STDOUT))
+        wait_port(ports["rhp"], 120)
+        wait_port(ports["bpq_telnet"], 60)
+        procs.append(subprocess.Popen(
+            [str(BIN), "-d", str(lm_dir), "-r", f"127.0.0.1:{ports['rhp']}", "-c", "N0LMB",
+             "-n", "N0PDN", "-m", "1=bpq", "-t"],
+            cwd=lm_dir, stdin=subprocess.DEVNULL, stdout=open(lm_dir / "stdout.log", "wb"),
+            stderr=subprocess.STDOUT))
+        wait_file(lm_dir / "stdout.log", r"Listening for connects to N0LMB")
+
+        # 1. Post the long message while the link is still fast
+        u = TelnetUser(ports["bpq_telnet"], tmp_path / "user.txt")
+        u.expect("user:")
+        u.send("test")
+        u.expect("password:")
+        u.send("test")
+        u.expect(r"\n")
+        time.sleep(1)
+        u.send("C 2 N0LMB")
+        banner = u.expect(r">\s*$", 90)
+        if re.search(r"enter your name", banner, re.I):
+            u.send("Tester")
+            u.expect(r">\s*$", 30)
+        u.send("SP N0ABC")
+        u.expect("Title", 30)
+        u.send("Long message")
+        u.expect("Message", 30)
+        for line in body:
+            u.send(line)
+        u.send(tail)
+        u.send("/EX")
+        num = re.search(r"Message: (\d+)", u.expect(r">\s*$", 60)).group(1)
+
+        # 2. Slow the link down and read the message back. As soon as it
+        # starts to arrive (by then the mail code has handed all of it to pdn),
+        # say bye. The mail code signs off and disconnects a second later,
+        # while most of the message is still waiting to go.
+        link.delay = SLOW_DELAY
+        u.send(f"R {num}")
+        u.expect("Line 01", 60)
+        u.send("B")
+        close_seen = []
+
+        def watch_close():
+            end = time.time() + 180
+            while time.time() < end and not close_seen:
+                if re.search(r'RHP > \{"type":"close"', (lm_dir / "stdout.log").read_bytes().decode("latin-1")):
+                    close_seen.append(time.monotonic())
+                time.sleep(0.05)
+
+        watcher = threading.Thread(target=watch_close, daemon=True)
+        watcher.start()
+        seen = u.expect(rf"{tail}|Returned to Node|Disconnected", 180)
+        tail_at = time.monotonic()
+        watcher.join(5)
+
+        # Everything the mail code wrote went to pdn before the close
+        sent, closed = "", False
+        for line in (lm_dir / "stdout.log").read_bytes().decode("latin-1").splitlines():
+            if line.startswith('linmail-pdn: RHP > {"type":"close"'):
+                closed = True
+                break
+            if line.startswith('linmail-pdn: RHP > {"type":"send"'):
+                sent += json.loads(line[len("linmail-pdn: RHP > "):])["data"]
+        assert closed, "linmail-pdn never closed the session"
+        assert tail in sent, "the mail code closed before sending the whole message"
+
+        assert tail in seen, "the end of the message never reached LinBPQ: pdn dropped it when linmail-pdn closed"
+        assert close_seen, "linmail-pdn's close was not seen"
+        lead = tail_at - close_seen[0]
+        print(f"The end of the message reached LinBPQ {lead:.1f} seconds after linmail-pdn closed the handle")
+        assert lead > 1, "the link was not slow enough for the close to matter"
+        u.expect(r"Returned to Node|Disconnected", 60)
+    finally:
+        if u:
+            u.close()
+        link.close()
+        for p in reversed(procs):
+            if p.poll() is None:
+                p.send_signal(signal.SIGTERM)
+        for p in procs:
+            try:
+                p.wait(15)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        for log in [tmp_path / "user.txt", lm_dir / "stdout.log"]:
+            if log.exists():
+                print(f"===== {log.relative_to(tmp_path)}")
+                print(log.read_bytes().decode("latin-1")[-4000:])
 
 
 def api(port, method, path, body=None, token=None):

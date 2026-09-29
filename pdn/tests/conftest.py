@@ -75,7 +75,7 @@ class Linmail:
                        env={k: v for k, v in os.environ.items() if not k.startswith("PDN_")})
 
     def start(self, *args: str, env: dict | None = None, rhp: bool = True):
-        argv = [str(BIN), "-d", str(self.dir), "-L", "1", "-t", "-W", str(self.web_port)]
+        argv = [str(BIN), "-d", str(self.dir), "-t", "-W", str(self.web_port)]
         if rhp:
             argv += ["-r", f"127.0.0.1:{self.fake.port}"]
         argv += list(args)
