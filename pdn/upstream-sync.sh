@@ -10,11 +10,14 @@
 # 2. Fast-forward our `upstream` branch to it. `upstream` only ever mirrors
 #    John's master; if his master is not a fast-forward of it, stop.
 # 3. Stop, successfully, if main already has that commit, or if a pull request
-#    for it was opened before (open, merged or closed).
+#    (or an issue standing in for one) was opened for it before, whatever
+#    became of it.
 # 4. Merge it into sync/upstream-<LinBPQ version>, a branch off main, run the
 #    full test suite (pdn/tests/ci.sh), push the branch and open a pull request
 #    into main with the result. On a merge conflict the branch is John's commit
-#    itself, so the pull request shows the conflicts; no tests are run.
+#    itself, so the pull request shows the conflicts; no tests are run. Where
+#    the organisation doesn't let workflows open pull requests, it opens an
+#    issue with the same text and a one-click link to open the pull request.
 #
 # Exits 0 when there is nothing to do or the tests passed, 1 after opening a
 # pull request for a conflict or a test failure, 2 on any other problem.
@@ -119,11 +122,18 @@ if git merge-base --is-ancestor "$TARGET" refs/remotes/origin/main; then
 	exit 0
 fi
 
-EXISTING=$(gh pr list --repo "$REPO" --state all --limit 1000 --json url,body \
-	--jq ".[] | select(.body | contains(\"$TARGET\")) | .url" | head -n 1) || die "could not list pull requests"
+# A pull request, or the issue opened in place of one (see the end), names
+# the upstream commit in its description
+FIND=".[] | select(.body | contains(\"$TARGET\")) | .url"
+EXISTING=$(gh pr list --repo "$REPO" --state all --limit 1000 --json url,body --jq "$FIND" | head -n 1) \
+	|| die "could not list pull requests"
+if [ -z "$EXISTING" ]; then
+	EXISTING=$(gh issue list --repo "$REPO" --state all --limit 1000 --json url,body --jq "$FIND" | head -n 1) \
+		|| die "could not list issues"
+fi
 if [ -n "$EXISTING" ]; then
-	say "there is already a pull request for $TARGET: $EXISTING. Nothing to do."
-	summary "Nothing to do: G8BPQ's \`$TARGET\` already has a pull request, $EXISTING"
+	say "G8BPQ's $TARGET was already raised: $EXISTING. Nothing to do."
+	summary "Nothing to do: G8BPQ's \`$TARGET\` was already raised, $EXISTING"
 	exit 0
 fi
 
@@ -255,9 +265,27 @@ if [ "$DRY_RUN" = 1 ]; then
 	cat "$BODY"
 	PR="(dry run)"
 else
-	PR=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body-file "$BODY") \
-		|| die "could not open the pull request"
-	say "opened $PR"
+	if PR=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$TITLE" --body-file "$BODY" 2> "$WORK/pr.err"); then
+		say "opened $PR"
+	elif grep -q "not permitted to create or approve pull requests" "$WORK/pr.err"; then
+		# The organisation doesn't let workflows open pull requests. Open an
+		# issue with the same text instead, and a link that opens the pull
+		# request in one click (and closes the issue when it is merged).
+		say "workflows may not open pull requests here; opening an issue instead"
+		PR=$(gh issue create --repo "$REPO" --title "$TITLE" --body-file "$BODY") || die "could not open an issue either"
+		NUMBER=${PR##*/}
+		COMPARE="${GITHUB_SERVER_URL:-https://github.com}/$REPO/compare/main...$BRANCH?expand=1&title=$(jq -rn --arg s "$TITLE" '$s|@uri')&body=$(jq -rn --arg s "Closes #$NUMBER, which has the details and the test result." '$s|@uri')"
+		{
+			echo "**[Open the pull request]($COMPARE)** for \`$BRANCH\`. (This repository's organisation doesn't let workflows open pull requests, so the sync workflow opened this issue instead.)"
+			echo
+			cat "$BODY"
+		} > "$WORK/issue.md"
+		gh issue edit "$PR" --repo "$REPO" --body-file "$WORK/issue.md" > /dev/null || die "could not add the pull request link to $PR"
+		say "opened $PR"
+	else
+		cat "$WORK/pr.err"
+		die "could not open the pull request"
+	fi
 fi
 
 summary "LinBPQ $VERSION (\`$TARGET\`): $TITLE, $PR"

@@ -8,7 +8,9 @@ name: upstream sync
 # was already opened. See pdn/upstream-sync.sh.
 #
 # Pull requests opened with the GITHUB_TOKEN don't start other workflows, which
-# is why the tests run here and their result goes in the pull request.
+# is why the tests run here and their result goes in the pull request. If the
+# organisation doesn't allow workflows to open pull requests at all, the same
+# text goes in an issue with a one-click link to open the pull request.
 
 on:
   schedule:
@@ -18,6 +20,8 @@ on:
 permissions:
   contents: write         # push `upstream` and the sync branch
   pull-requests: write    # open the pull request
+  issues: write           # or an issue in its place, if the organisation
+                          # doesn't let workflows open pull requests
 
 concurrency:
   group: upstream-sync
