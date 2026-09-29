@@ -3,3 +3,5 @@ build-asan/
 linmail-pdn
 linmail-pdn-asan
 dist/
+reports/
+__pycache__/

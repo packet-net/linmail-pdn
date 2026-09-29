@@ -84,7 +84,7 @@ def test_deb_install_and_run(tmp_path):
         out = sudo("dpkg", "-i", DEB)
         print(out.stdout)
         assert (APP_DIR / "linmail-pdn").exists() and (APP_DIR / "pdn-app.yaml").exists()
-        assert (APP_DIR / "HTML" / "WebMailPage.txt").exists()
+        assert (APP_DIR / "HTML" / "background.jpg").exists()
 
         # pdn runs as this user here, not as packetnet: give it the state dir
         sudo("install", "-d", "-o", str(os.getuid()), "-g", str(os.getgid()), "-m", "0750", str(STATE_DIR))

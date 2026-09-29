@@ -2,6 +2,8 @@
 
 linmail-pdn is the LinBPQ mail server ("linmail") built on its own, without the node, and connected to a packet.net (pdn) node over pdn's RHPv2 server. It uses the unchanged upstream mail sources, so John's mail changes keep flowing in with a normal merge. It sits alongside pdn-bbs (the from-scratch .NET BBS for pdn); both are wanted.
 
+It lives in [packet-net/linmail-pdn](https://github.com/packet-net/linmail-pdn), a fork of G8BPQ's LinBPQ: `upstream` mirrors John's master, `main` is that plus `pdn/` and the workflows. `README.md` in this directory is the landing page and describes how John's releases flow in. Until 2026-09-29 the work lived on the `pdn-linmail` branch of a personal linbpq fork, on an older LinBPQ base.
+
 ## How it works
 
 On Windows, BPQMail was always a separate program talking to the node through the bpq32 host API. LinBPQ compiles the same mail code into the node. linmail-pdn goes back to the separate-program model, with pdn in place of bpq32:
@@ -11,7 +13,7 @@ On Windows, BPQMail was always a separate program talking to the node through th
 - Idle sessions are dropped after the idle time the mail code sets (`ChangeSessionIdletime`, 15 minutes by default, or a connect script's `IDLETIME`), as BPQ does.
 - UI frames the mail code sends (FBB message header broadcasts and mail-for beacons) go out through one RHP `dgram` socket, on the pdn port the port map gives for the `UIPortN` number.
 - Outbound forwarding keeps the BPQ model. `ConnectUsingAppl` gives the stream a session with an emulated node command handler. The connect script's `C port CALL` becomes an RHP `open`, answered with BPQ-style node text (`N0PDN} Connected to CALL`, `Failure with CALL`, `Busy from CALL`). After that the stream is transparent, so later script lines go to the far node as data and multi-hop scripts work unchanged.
-- `pdnweb.c` serves webmail and the management pages on a loopback port (18095) for pdn's app gateway, calling the same upstream handler LinBPQ's `HTTPcode.c` does (`ProcessMailHTTPMessage`). It trusts the gateway's identity instead of BPQ's logins: requests need `X-Pdn-Gateway: 1` and a loopback `Host` (anything else, including direct access and DNS rebinding, is refused); `X-Pdn-User` picks the BBS user (a callsign username is that BBS user; an admin with a plain username is the BBS sysop); the management pages, and any BBS account flagged sysop, need `X-Pdn-Scope: admin`. An admin always reaches the management pages, acting as the sysop, even without a BBS account; webmail needs one, and says so. Requests that would crash the upstream webmail code are refused first (see `UPSTREAM-BUGS.md`). The pages' root-relative links are rewritten under `X-Forwarded-Prefix` (`/apps/linmail`). HTML templates come from the data directory's `HTML/` (as in LinBPQ) and then from the ones installed with the package.
+- `pdnweb.c` serves webmail and the management pages on a loopback port (18095) for pdn's app gateway, calling the same upstream handler LinBPQ's `HTTPcode.c` does (`ProcessMailHTTPMessage`). It trusts the gateway's identity instead of BPQ's logins: requests need `X-Pdn-Gateway: 1` and a loopback `Host` (anything else, including direct access and DNS rebinding, is refused); `X-Pdn-User` picks the BBS user (a callsign username is that BBS user; an admin with a plain username is the BBS sysop); the management pages, and any BBS account flagged sysop, need `X-Pdn-Scope: admin`. An admin always reaches the management pages, acting as the sysop, even without a BBS account; webmail needs one, and says so. Requests that would crash the upstream webmail code are refused first (see `UPSTREAM-BUGS.md`). The pages' root-relative links are rewritten under `X-Forwarded-Prefix` (`/apps/linmail`). The page templates are LinBPQ's built-in ones (upstream `HTMLCommonCode.c` and `templatedefs.c`, linked as they are), so they change when John changes them. The two pictures the pages use (`background.jpg`, `favicon.ico`) come from the data directory's `HTML/`, as in LinBPQ, then from `pdn/HTML` as installed with the package.
 - `linmail-pdn.c` is the mail half of `LinBPQ.c`: it loads `linmail.cfg` and the mail files from a directory and runs the same timer calls at the same rates (one tick every 100 ms, forwarding every 2 s, slow timers every 10 s).
 - The node structures the mail code reads directly (`BPQHOSTVECTOR`, the session's `L4USER`, `Secure_Session`, the `L4CROSSLINK` walk in `Connected()`) are satisfied by a small fake vector in `pdnhost.c`, so no upstream source file needed changing.
 
@@ -26,7 +28,7 @@ The data directory holds `linmail.cfg`, the mail files and `linmail-pdn.conf`, t
 
 ## Tests and CI
 
-`pdn/tests` has two suites (pytest):
+`pdn/tests` has these suites (pytest), plus `bpqmail_cfg.py`, the linmail.cfg builder they share:
 
 - `test_linmail_pdn.py` drives linmail-pdn against a fake RHP server (`fake_rhp.py`): listening on the call and an alias, the settings file order, RHP auth, a user session, B2 forwarding out (checking the FBB block framing and checksum) and in (replaying a transfer recorded from a real LinBPQ), connect script failures and unsupported commands, a multi-hop script, the idle timeout, UI frames, reconnecting when pdn restarts, a non-callsign caller, and the SMTP/POP3/NNTP servers staying off.
 - `test_real_pdn.py` runs a real pdn node (`PDN_BIN`, the `packetnet` binary from a release) and a LinBPQ built from this tree (`LINBPQ_BIN`): UI frames accepted by pdn, a user session over AX.25, B2 forwarding both ways, and RHP auth against a pdn user.
@@ -35,23 +37,36 @@ The data directory holds `linmail.cfg`, the mail files and `linmail-pdn.conf`, t
 - `test_real_pdn.py` also has pdn discover the app package, start linmail-pdn itself with the callsign it assigns, and serve the pages through its real gateway to an admin and a read-only user.
 - `test_deb.py` installs the built .deb (needs sudo), lets pdn find it in `/usr/share/packetnet/apps/linmail` and run it with state in `/var/lib/packetnet/apps/linmail`, checks an AX.25 user session and webmail, then removes everything.
 
-`.github/workflows/linmail-pdn.yml` builds linmail-pdn and LinBPQ, fetches the latest pdn node release, runs all of these, and builds and installs the amd64 .deb, on every push to `pdn-linmail` or `master` that touches the mail code or `pdn/`.
+`pdn/tests/ci.sh` runs the lot the way CI does, in stages (dependencies, builds, fetching the latest pdn node release, the suites, the ASan run, the .deb build and install); `pdn/tests/ci.sh build fake asan` runs just the builds and those two. `.github/workflows/linmail-pdn.yml` runs every stage, one per step, on every push to `main` and every pull request into it. LinBPQ 6.0.25.41 and later need libbacktrace to link, which comes with gcc (`-lbacktrace`).
 
 ## Packaging
 
 `packaging/` holds the app manifest (`pdn-app.yaml`: id `linmail`, name "LinBPQ Mail", capabilities `packet` and `web`, a pdn-supervised `service`, the `ui` upstream on 18095 shown `embedded` in the panel, node verb `MAIL` so it does not collide with pdn-bbs's `BBS`), the Debian control file and postinst, `build-deb.sh`, and `build-in-docker.sh`, which builds in a Debian bookworm container (under QEMU for arm) so the binary needs only libc 2.36 and runs on bookworm and trixie. jansson and libconfig are linked in (`make -C pdn static`) because libconfig's soname differs between Debian releases. The package installs code to `/usr/share/packetnet/apps/linmail`; state stays in `/var/lib/packetnet/apps/linmail` and is never shipped.
 
-`.github/workflows/linmail-pdn-release.yml` builds the amd64, arm64 and armhf .debs. A `linmail-pdn-v<version>` tag attaches them to a GitHub Release; a push to `pdn-linmail` that touches the packaging builds them as artifacts only. Nothing here publishes to the packet-net apt repo or catalog.
+Versions are `<LinBPQ version>-pdn<n>`: John's version from `Versions.h`, then our own release number for it, from 1. The tag is `v6.0.25.41-pdn1`, the package version `6.0.25.41-pdn1`, and `linmail-pdn --version` prints both (`linmail-pdn 6.0.25.41-pdn1`, `LinBPQ 6.0.25.41`). The Makefile takes it as `PDN_VERSION` (default `<LinBPQ version>-dev`); `build-deb.sh` refuses a binary built with a different one. A new LinBPQ version starts again at `-pdn1`. CI builds are `<LinBPQ version>-pdn0~ci<run>`, which sort before `-pdn1`.
+
+`.github/workflows/linmail-pdn-release.yml` builds the amd64, arm64 and armhf .debs. A `v<LinBPQ version>-pdn<n>` tag whose LinBPQ part matches `Versions.h` attaches them to a GitHub Release; a push to `main` that touches the packaging builds them as artifacts only. Nothing here publishes to the packet-net apt repo or catalog.
 
 `MIGRATING.md` is the sysop's guide to moving a LinBPQ mailbox across; it ships in the package as `/usr/share/doc/pdn-linmail/MIGRATING.md`.
 
 ## Lab
 
-`lab/` holds the loopback lab used for the proof: a pdn node (N0PDN, one AXUDP port `bpq`, RHP on 19000), a LinBPQ node with mail (N0BPQ, BBS N0BPQ-1) built from this fork, and linmail-pdn (BBS N0LMB). `lab/lab.sh start WORKDIR packetnet linbpq` starts all three; `lab/session.py` logs in to the LinBPQ telnet port as N0USR, connects to a BBS, sends a personal message, lists it and reads it back. Posting to `N0ABC @ N0BPQ` on N0LMB, or to `N0XYZ @ N0LMB` on N0BPQ (`BBS` = `LOCAL`), forwards it with FBB B2 compression within a few seconds.
+`lab/` holds the loopback lab used for the proof: a pdn node (N0PDN, one AXUDP port `bpq`, RHP on 19000), a LinBPQ node with mail (N0BPQ, BBS N0BPQ-1) built from this tree, and linmail-pdn (BBS N0LMB). `lab/lab.sh start WORKDIR packetnet linbpq` starts all three; `lab/session.py` logs in to the LinBPQ telnet port as N0USR, connects to a BBS, sends a personal message, lists it and reads it back. Posting to `N0ABC @ N0BPQ` on N0LMB, or to `N0XYZ @ N0LMB` on N0BPQ (`BBS` = `LOCAL`), forwards it with FBB B2 compression within a few seconds.
 
 ## Upstream edits
 
-None. Every mail source file builds as it is. The build links `BBSUtilities.c BBSHTMLConfig.c FBBRoutines.c MailCommands.c MailDataDefs.c MailRouting.c MailTCP.c MBLRoutines.c WPRoutines.c WebMail.c NNTPRoutines.c lzhuf32.c` plus the node-free helpers `Housekeeping.c UIRoutines.c utf8Routines.c md5.c compatbits.c CMSAuth.c`. If a later upstream change needs a pdn-specific branch, put it behind `#ifdef PDN_LINMAIL` and list it here.
+None, and there must never be any: John's files stay exactly as he publishes them, so his releases merge cleanly. The build links `BBSUtilities.c BBSHTMLConfig.c FBBRoutines.c MailCommands.c MailDataDefs.c MailRouting.c MailTCP.c MBLRoutines.c WPRoutines.c WebMail.c NNTPRoutines.c lzhuf32.c` plus the node-free helpers `Housekeeping.c UIRoutines.c utf8Routines.c md5.c compatbits.c CMSAuth.c HTMLCommonCode.c` (`make -C pdn -s upstream-sources` lists them). Anything an upstream change breaks is fixed in `pdn/`.
+
+## Upstream drift
+
+What changed under the shim when it moved from the old base (LinBPQ 6.0.25.28 plus the personal fork's own changes) to John's 6.0.25.41, and what was done about it:
+
+- `Debugprintf` moved out of `BBSUtilities.c` into the node's `CommonCode.c`, and the mail code's `LOG_DEBUG_X` lines now go through it. `linmail-pdn.c` provides it, writing to the mail debug log (`logs/log_YYMMDD_DEBUG.txt`) where those lines went before.
+- `WriteLogLine` now keeps each log file open for up to 30 seconds instead of closing it after every line, so lines could sit unwritten. The main loop flushes the log files every tick (under the log semaphore).
+- The old base had the HTML page templates as files in `HTML/`; John's tree builds them in (`templatedefs.c`, which LinBPQ prefers to any file anyway) and has no `HTML/`. The shim now links upstream's `HTMLCommonCode.c` instead of its own template loader, and ships only the two pictures, in `pdn/HTML`.
+- The tests used a helper from the old fork's own test suite (`tests/integration/helpers/bpqmail_cfg.py`), which John's tree doesn't have. It is now `pdn/tests/bpqmail_cfg.py`.
+- LinBPQ itself (built for the real pdn tests) now links libbacktrace.
+- No change needed: the node structures the shim fakes (`asmstrucs.h` changes are all in routing and NET/ROM fields the mail code doesn't read), `struct HTTPConnectionInfo` (rebuilt from the header), `struct HtmlFormDir` (unchanged), `ProcessMailHTTPMessage` and the other host API calls, and the timer rates in `LinBPQ.c`. John's other mail changes (a new user's `L` list starts at the last 20 messages, paging in the PG server, case-insensitive SMTP and POP3 commands, a webmail websocket URL fix) come along as they are. The upstream bugs in `UPSTREAM-BUGS.md` are all still there.
 
 ## Out of scope
 
@@ -95,6 +110,7 @@ In `pdnstubs.c` and `pdnhost.c`:
 - [x] 3. Tests (2026-09-29): `pdn/tests`, a fake RHP server suite and a run against a real pdn node and LinBPQ.
 - [x] 4. CI (2026-09-29): `.github/workflows/linmail-pdn.yml`.
 - [x] 5. Web (2026-09-29): `pdnweb.c`, webmail and the management pages through pdn's app gateway with pdn identity; tested faked and through a real pdn gateway.
-- [x] 6. Packaging (2026-09-29): `pdn-app.yaml`, amd64/arm64/armhf .debs built by `linmail-pdn-release.yml` on a `linmail-pdn-v*` tag; the amd64 .deb installed and run by a real pdn in CI. Still to do, outside this repo: publishing a release, the packet-net apt repo and the pdn app catalog entry.
+- [x] 6. Packaging (2026-09-29): `pdn-app.yaml`, amd64/arm64/armhf .debs built by `linmail-pdn-release.yml` on a release tag (now `v<LinBPQ version>-pdn<n>`); the amd64 .deb installed and run by a real pdn in CI. Still to do, outside this repo: publishing a release, the packet-net apt repo and the pdn app catalog entry.
 - [x] 7. Migration notes (2026-09-29): `MIGRATING.md`.
+- [x] Move (2026-09-29): to packet-net/linmail-pdn on John's 6.0.25.41 (see Upstream drift), with a daily upstream sync workflow and `<LinBPQ version>-pdn<n>` release versions.
 - [ ] 8. Later, if wanted: MQTT, Winlink reporting, packet map, answering FBB header resync requests.

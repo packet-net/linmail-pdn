@@ -1,5 +1,5 @@
 /*
-Copyright 2026 the linbpq fork contributors
+Copyright 2026 the linmail-pdn contributors
 
 This file is part of LinBPQ/BPQ32.
 
@@ -119,9 +119,12 @@ static void WebLog(const char * format, ...)
 	printf("linmail-pdn: web: %s\n", Mess);
 }
 
-//	HTML templates. LinBPQ reads them from $BPQDirectory/HTML. Keep that (so a
-//	sysop's edited copies still win), then fall back to the ones installed
-//	with linmail-pdn.
+//	The page templates come built in, from upstream's HTMLCommonCode.c and
+//	templatedefs.c, exactly as in LinBPQ (which takes the built-in copy over
+//	any file). Only the two pictures the pages use (background.jpg and
+//	favicon.ico) are files: from $BPQDirectory/HTML, as in LinBPQ, then the
+//	configured html_dir, then HTML/ beside the binary (the package, or pdn/HTML
+//	in a source tree).
 
 void PdnWebSetTemplateDirs(char * Configured, char * ExeDir)
 {
@@ -133,10 +136,7 @@ void PdnWebSetTemplateDirs(char * Configured, char * ExeDir)
 		snprintf(TemplateDirs[TemplateDirCount++], 300, "%s", Configured);
 
 	if (ExeDir && ExeDir[0])
-	{
 		snprintf(TemplateDirs[TemplateDirCount++], 300, "%s/HTML", ExeDir);
-		snprintf(TemplateDirs[TemplateDirCount++], 300, "%s/../HTML", ExeDir);	// Running from a source tree
-	}
 }
 
 static char * FindTemplate(char * FN, char * Path, int Max)
@@ -177,34 +177,6 @@ static char * ReadWholeFile(char * Path, int * Len)
 	Data[*Len] = 0;
 	fclose(Handle);
 	return Data;
-}
-
-char * GetTemplateFromFile(int Version, char * FN)
-{
-	// Same contract as HTMLCommonCode.c
-
-	char Path[400];
-	char * MsgBytes;
-	int Len;
-
-	if (FindTemplate(FN, Path, sizeof(Path)) == NULL || (MsgBytes = ReadWholeFile(Path, &Len)) == NULL)
-		return _strdup("File is missing");
-
-	if (Version)
-	{
-		int PageVersion = 0;
-
-		if (memcmp(MsgBytes, "<!-- Version", 12) == 0)
-			PageVersion = atoi(&MsgBytes[13]);
-
-		if (Version != PageVersion)
-		{
-			free(MsgBytes);
-			MsgBytes = malloc(256);
-			sprintf(MsgBytes, "Wrong Version of HTML Page %s - is %d should be %d. Please update", FN, PageVersion, Version);
-		}
-	}
-	return MsgBytes;
 }
 
 //	URL rewriting for the gateway prefix

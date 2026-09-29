@@ -17,11 +17,9 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent
-sys.path.insert(0, str(REPO / "tests" / "integration"))
 sys.path.insert(0, str(HERE))
 
-from helpers.bpqmail_cfg import FwdPartner, _user_record_string, render_bpqmail_cfg  # noqa: E402
+from bpqmail_cfg import FwdPartner, _user_record_string, render_bpqmail_cfg  # noqa: E402
 from fake_rhp import FakeRhp  # noqa: E402
 
 BIN = Path(os.environ.get("LINMAIL_PDN_BIN", HERE.parent / "linmail-pdn"))
@@ -82,7 +80,7 @@ class Linmail:
             argv += ["-r", f"127.0.0.1:{self.fake.port}"]
         argv += list(args)
         full_env = {k: v for k, v in os.environ.items() if not k.startswith("PDN_")}
-        full_env["PDN_APP_DIR"] = str(REPO)       # so the HTML templates are found wherever the binary is
+        full_env["PDN_APP_DIR"] = str(HERE.parent)  # so pdn/HTML is found wherever the binary is
         full_env.update(env or {})
         self.proc = subprocess.Popen(argv, cwd=self.dir, env=full_env, stdin=subprocess.DEVNULL,
                                      stdout=open(self.out, "wb"), stderr=subprocess.STDOUT)

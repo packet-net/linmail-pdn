@@ -3,7 +3,8 @@
 # container, so the binary needs nothing newer than bookworm's libc and runs on
 # bookworm and trixie alike. Non-native architectures run under QEMU (binfmt).
 #
-#   pdn/packaging/build-in-docker.sh ARCH VERSION     (ARCH: amd64, arm64, armhf)
+#   pdn/packaging/build-in-docker.sh ARCH VERSION     (ARCH: amd64, arm64, armhf;
+#                                                      VERSION e.g. 6.0.25.41-pdn1)
 #
 # The .deb lands in pdn/dist.
 
@@ -30,7 +31,7 @@ docker run --rm --platform "$PLATFORM" -v "$TOP:/src:ro" -v "$TOP/pdn/dist:/out"
 		mkdir /build
 		cd /src && tar --exclude=./pdn/build --exclude=./pdn/dist --exclude=./pdn/linmail-pdn --exclude=./.git -cf - . | tar -xf - -C /build
 		cd /build/pdn
-		make -j"$(nproc)" static >/dev/null
+		make -j"$(nproc)" static PDN_VERSION="$VERSION" >/dev/null
 		packaging/build-deb.sh "$ARCH" "$VERSION"
 		cp dist/*.deb /out/
 		chown "$HOST_UID:$HOST_GID" /out/*.deb

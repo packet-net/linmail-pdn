@@ -1,5 +1,5 @@
 /*
-Copyright 2026 the linbpq fork contributors
+Copyright 2026 the linmail-pdn contributors
 
 This file is part of LinBPQ/BPQ32.
 
@@ -31,6 +31,16 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 
 #define CKernel
 #include "Versions.h"
+
+//	This build's own version, <LinBPQ version>-pdn<n> (for example
+//	6.0.25.41-pdn1), written to build/pdnversion.h by the Makefile from
+//	PDN_VERSION. The LinBPQ part is the one in Versions.h.
+
+#include "pdnversion.h"
+
+#ifndef PDN_VERSION
+#define PDN_VERSION "dev"
+#endif
 
 #include <getopt.h>
 #include <signal.h>
@@ -270,6 +280,63 @@ void FreeSemaphore(struct SEM * Semaphore)
 	Semaphore->Flag = 0;
 }
 
+//	Debug output. LinBPQ 6.0.25.41 moved Debugprintf out of BBSUtilities.c
+//	into the node's CommonCode.c, where it writes logs/NodeDebugLog_*.log, and
+//	sends the mail code's own LOG_DEBUG_X lines (Logprintf) to it. There is
+//	no node here, so it writes the mail server's debug log
+//	(logs/log_YYMMDD_DEBUG.txt), as BPQMail does on Windows. That keeps
+//	LOG_DEBUG_X lines in the file they went to before the move.
+
+VOID __cdecl Debugprintf(const char * format, ...)
+{
+	static int Busy = 0;
+	char Mess[8192];
+	va_list(arglist);
+	int Len;
+
+	if (Busy)
+		return;					// Called again from inside WriteLogLine
+
+	va_start(arglist, format);
+	Len = vsnprintf(Mess, sizeof(Mess), format, arglist);
+	va_end(arglist);
+
+	if (Len < 0)
+		return;
+
+	if (Len >= (int)sizeof(Mess))
+		Len = sizeof(Mess) - 1;
+
+	while (Len > 0 && (Mess[Len - 1] == '\r' || Mess[Len - 1] == '\n'))
+		Mess[--Len] = 0;
+
+	Busy = 1;
+	WriteLogLine(NULL, '!', Mess, Len, LOG_DEBUG_X);
+	Busy = 0;
+}
+
+//	Since 6.0.25.41 WriteLogLine keeps each log file open for up to 30
+//	seconds between writes instead of closing it every time, so a line can
+//	sit in the stdio buffer until the next write. Flush once a tick so the
+//	files (and the logLatest links) stay current for a sysop reading them.
+
+extern struct SEM LogSEM;
+
+static void FlushLogs()
+{
+	int i;
+
+	GetSemaphore(&LogSEM, 0);
+
+	for (i = 0; i < 4; i++)
+	{
+		if (LogHandle[i])
+			fflush(LogHandle[i]);
+	}
+
+	FreeSemaphore(&LogSEM);
+}
+
 //	Connect script ELSE lines. After a failed connect, ProcessBBSConnectScript
 //	(BBSUtilities.c) checks for "ELSE DELAY n" by comparing the five bytes at
 //	Cmd[5], which for a bare "ELSE" line lie past the end of the string. Give
@@ -392,6 +459,7 @@ static char HelpScreen[] =
 	"  -t, --trace          Print all RHP traffic\n"
 	"  -W, --web-port PORT  Loopback port for webmail through pdn's app gateway\n"
 	"                       (default 18095, 0 = off)\n"
+	"  -V, --version        Show the linmail-pdn and LinBPQ versions\n"
 	"  -h, --help           Show this help\n"
 	"Settings are taken from the settings file, then the environment the pdn app\n"
 	"supervisor sets (PDN_RHP_HOST, PDN_RHP_PORT, PDN_APP_CALLSIGN, PDN_NODE_CALLSIGN,\n"
@@ -414,10 +482,11 @@ static struct option long_options[] =
 	{"trace", no_argument, 0, 't'},
 	{"web-port", required_argument, 0, 'W'},
 	{"help", no_argument, 0, 'h'},
+	{"version", no_argument, 0, 'V'},
 	{NULL, no_argument, NULL, 0}
 };
 
-static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:tW:h";
+static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:tW:hV";
 
 static char LogDirOption[260] = "";
 static int WebPort = 18095;
@@ -606,8 +675,6 @@ int main(int argc, char * argv[])
 
 	signal(SIGHUP, SIG_IGN);
 
-	printf("linmail-pdn: G8BPQ Mail Server %s for packet.net\n", TextVerstring);
-
 	// As LinBPQ.c main()
 
 	sprintf(RlineVer, "LinBPQ%d.%d.%d", Ver[0], Ver[1], Ver[2]);
@@ -654,11 +721,16 @@ int main(int argc, char * argv[])
 		case 'h':
 			printf("%s", HelpScreen);
 			return 0;
+		case 'V':
+			printf("linmail-pdn %s\nLinBPQ %s (G8BPQ's mail server)\n", PDN_VERSION, TextVerstring);
+			return 0;
 		case '?':
 			printf("%s", HelpScreen);
 			return 1;
 		}
 	}
+
+	printf("linmail-pdn: linmail-pdn %s, G8BPQ Mail Server %s for packet.net\n", PDN_VERSION, TextVerstring);
 
 	if (DataDir[0] == 0 && getenv("PDN_APP_STATE"))
 		Copy(DataDir, sizeof(DataDir), getenv("PDN_APP_STATE"));
@@ -1019,6 +1091,7 @@ int main(int argc, char * argv[])
 		TCPFastTimer();
 		TrytoSend();
 		PdnWebPoll();
+		FlushLogs();
 
 		if (Slowtimer > 100)
 			Slowtimer = 0;

@@ -332,3 +332,14 @@ def test_bare_else_in_connect_script(linmail, fake):
     post(fake, h, "N0ABC @ N0BPQ", "Else test", ["x"])
     linmail.wait_bbslog(r"N0PDN\} Failure with N0ZZZ", timeout=30)
     linmail.wait_bbslog(r"N0PDN\} Connected to N0BPQ-1", timeout=30)
+
+
+def test_version():
+    """--version prints this build's version and the LinBPQ one from Versions.h."""
+    import subprocess
+    from conftest import BIN
+    versions_h = (Path(__file__).resolve().parents[2] / "Versions.h").read_text(errors="replace")
+    linbpq = re.search(r'#define KVerstring "([0-9.]+)', versions_h).group(1)
+    out = subprocess.run([str(BIN), "--version"], capture_output=True, text=True, check=True).stdout.splitlines()
+    assert re.fullmatch(rf"linmail-pdn {re.escape(linbpq)}-(dev|pdn[0-9]+(~ci[0-9]+)?)", out[0]), out
+    assert out[1] == f"LinBPQ {linbpq} (G8BPQ's mail server)", out

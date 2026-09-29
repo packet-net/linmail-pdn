@@ -1,0 +1,49 @@
+name: upstream sync
+
+# Once a day (and on demand) brings G8BPQ's latest LinBPQ in: fast-forwards
+# the `upstream` branch to John's master, merges it into a sync/upstream-<version>
+# branch off main, runs the whole test suite (pdn/tests/ci.sh, AddressSanitizer
+# included) and opens a pull request into main with the result. Does nothing
+# when main already has John's latest, or when a pull request for that commit
+# was already opened. See pdn/upstream-sync.sh.
+#
+# Pull requests opened with the GITHUB_TOKEN don't start other workflows, which
+# is why the tests run here and their result goes in the pull request.
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write         # push `upstream` and the sync branch
+  pull-requests: write    # open the pull request
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync from G8BPQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch, merge, test and open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pdn/upstream-sync.sh
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-sync-junit
+          path: pdn/reports/
+          if-no-files-found: ignore

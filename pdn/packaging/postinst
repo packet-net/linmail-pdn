@@ -3,10 +3,11 @@ set -e
 
 # pdn-linmail postinst.
 #
-# This package ships code only (the binary, the app manifest and the HTML
-# templates) into /usr/share/packetnet/apps/linmail. Runtime state (linmail.cfg,
-# the mail files, linmail-pdn.conf) lives in /var/lib/packetnet/apps/linmail and
-# is never shipped or overwritten by the package.
+# This package ships code only (the binary, the app manifest and the two
+# pictures the web pages use) into /usr/share/packetnet/apps/linmail. Runtime
+# state (linmail.cfg, the mail files, linmail-pdn.conf) lives in
+# /var/lib/packetnet/apps/linmail and is never shipped or overwritten by the
+# package.
 #
 # The packetnet node package owns the packetnet user and /var/lib/packetnet.
 # It is only a Recommends, so prepare the state dir only when the user exists;

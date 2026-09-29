@@ -1,6 +1,6 @@
 # Upstream bugs found while building linmail-pdn
 
-These are in LinBPQ's own mail code, so they affect LinBPQ as well as linmail-pdn. linmail-pdn works round each one without editing the upstream files (details below), so nothing here blocks it. They're written up so Tom can decide whether to pass them on to John. Line numbers are from this fork's master at b2d4b3c. Each crash was reproduced with AddressSanitizer.
+These are in LinBPQ's own mail code, so they affect LinBPQ as well as linmail-pdn. linmail-pdn works round each one without editing the upstream files (details below), so nothing here blocks it. They're written up so Tom can decide whether to pass them on to John. Line numbers are from G8BPQ's LinBPQ 6.0.25.41 (commit 4b7a47b). Each crash was reproduced with AddressSanitizer.
 
 ## 1. Webmail form posts read fields that weren't sent
 
@@ -18,12 +18,12 @@ These are in LinBPQ's own mail code, so they affect LinBPQ as well as linmail-pd
 
 ## 3. A bare `ELSE` in a connect script is read past its end
 
-- **Where:** `BBSUtilities.c` line 8414 in `ProcessBBSConnectScript`: `_memicmp(&Cmd[5], "DELAY", 5)`.
+- **Where:** `BBSUtilities.c` line 8404 in `ProcessBBSConnectScript`: `_memicmp(&Cmd[5], "DELAY", 5)`.
 - **Trigger:** a forwarding connect script with an `ELSE` line (the usual form, with no `DELAY`), after a failed connect. `Cmd` is the 5 byte string `"ELSE"`, so the comparison reads 5 bytes beyond it. This usually goes unnoticed, but it's a heap overread on every failed forward attempt that has an alternative.
 - **Suggested fix:** `if (strlen(Cmd) > 5 && _memicmp(&Cmd[5], "DELAY", 5) == 0)`.
 - **linmail-pdn:** `linmail-pdn.c` (`PadElseLines`) gives every short `ELSE` line enough zeroed room that the check stays inside its own memory. It does this once per line, including lines set later from the web pages or the `FWD` command.
 
 ## 4. Smaller ones
 
-- **`HTTPcode.c` line 323, `UndoTransparency`:** a `%` at the end of a form value, or one not followed by two hex digits, makes it read and write past the end of the string. linmail-pdn has its own copy that leaves such a `%` alone. Suggested fix: decode `%xx` only when both following characters are hex digits.
+- **`HTTPcode.c` line 326, `UndoTransparency`:** a `%` at the end of a form value, or one not followed by two hex digits, makes it read and write past the end of the string. linmail-pdn has its own copy that leaves such a `%` alone. Suggested fix: decode `%xx` only when both following characters are hex digits.
 - **`BBSUtilities.c` line 279, `FilesNames[4][100]`:** the log file name is copied in with `strcpy` at line 307, so a log directory path longer than about 70 characters overflows it and aborts under glibc's fortify checks. linmail-pdn refuses such a path at start-up. Suggested fix: size the buffer `MAX_PATH`, or use `strncpy`.

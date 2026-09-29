@@ -2,8 +2,8 @@
 #
 #	Builds the LinBPQ mail server as a standalone program that reaches a
 #	packet.net node over RHPv2. Uses the upstream mail sources from the
-#	directory above, unchanged apart from a few PDN_LINMAIL blocks, plus the
-#	shim in this directory. None of the node code is linked.
+#	directory above, unchanged, plus the shim in this directory. None of the
+#	node code is linked.
 #
 #	make -C pdn            (or: cd pdn && make linmail-pdn)
 
@@ -15,16 +15,25 @@ MAIL_SRCS = BBSUtilities.c BBSHTMLConfig.c FBBRoutines.c MailCommands.c \
  MailDataDefs.c MailRouting.c MailTCP.c MBLRoutines.c WPRoutines.c WebMail.c \
  NNTPRoutines.c lzhuf32.c
 
-# Upstream support sources the mail code needs that carry no node state
+# Upstream support sources the mail code needs that carry no node state.
+# HTMLCommonCode.c is GetTemplateFromFile, with the built-in page templates
+# (templatedefs.c) LinBPQ uses.
 SUPPORT_SRCS = Housekeeping.c UIRoutines.c utf8Routines.c md5.c compatbits.c \
- CMSAuth.c
+ CMSAuth.c HTMLCommonCode.c
 
 # The pdn shim
 SHIM_SRCS = linmail-pdn.c pdnhost.c pdnweb.c pdnstubs.c
 
+# Versions. LINBPQ_VERSION is G8BPQ's, from Versions.h (KVerstring). This
+# build's own, PDN_VERSION, is <LinBPQ version>-pdn<n> for a release (set by
+# the release workflow from the tag, e.g. 6.0.25.41-pdn1), <LinBPQ version>-dev
+# otherwise. linmail-pdn --version prints both.
+LINBPQ_VERSION := $(shell sed -n 's/^\#define KVerstring "\([0-9.]*\).*/\1/p' $(TOP)/Versions.h)
+PDN_VERSION ?= $(LINBPQ_VERSION)-dev
+
 CC = gcc
 CFLAGS = -DLINBPQ -DPDN_LINMAIL -DNOMQTT -MMD -g -O1 -fcommon -fasynchronous-unwind-tables \
- -I$(TOP) -I. -w $(EXTRA_CFLAGS)
+ -I$(TOP) -I. -I$(BUILD) -w $(EXTRA_CFLAGS)
 SHIM_CFLAGS = -Wall -Wno-unused-variable -Wno-unused-function -Wno-pointer-sign \
  -Wno-unused-but-set-variable -Wno-format-truncation -Wno-stringop-truncation
 LIBS = -ljansson -lconfig -lm -lz -lpthread
@@ -54,9 +63,28 @@ asan:
 		EXTRA_CFLAGS="-fsanitize=address -fno-omit-frame-pointer" \
 		LIBS="-fsanitize=address $(LIBS)"
 
-# make -C pdn deb ARCH=amd64 VERSION=0.1.0: a .deb in pdn/dist (see packaging/build-deb.sh)
+# make -C pdn deb ARCH=amd64 PDN_VERSION=6.0.25.41-pdn1: a .deb in pdn/dist
+# (see packaging/build-deb.sh)
 deb: static
-	packaging/build-deb.sh $(ARCH) $(VERSION)
+	packaging/build-deb.sh $(ARCH) $(PDN_VERSION)
+
+# make -C pdn -s linbpq-version: print G8BPQ's version (for the workflows)
+linbpq-version:
+	@echo $(LINBPQ_VERSION)
+
+# make -C pdn -s upstream-sources: the upstream files linmail-pdn builds (for
+# the upstream sync workflow's pull requests)
+upstream-sources:
+	@echo $(MAIL_SRCS) $(SUPPORT_SRCS)
+
+# pdnversion.h is rewritten only when PDN_VERSION changes, so a new version
+# rebuilds linmail-pdn.o and nothing else
+$(BUILD)/pdnversion.h: FORCE | $(BUILD)
+	@echo '#define PDN_VERSION "$(PDN_VERSION)"' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(BUILD)/linmail-pdn.o: $(BUILD)/pdnversion.h
 
 $(BUILD)/%.o: $(TOP)/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -72,4 +100,4 @@ $(BUILD):
 clean:
 	rm -rf $(BUILD) build-asan linmail-pdn linmail-pdn-asan dist
 
-.PHONY: all clean static deb asan
+.PHONY: all clean static deb asan linbpq-version upstream-sources FORCE

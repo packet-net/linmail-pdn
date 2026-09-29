@@ -4,17 +4,22 @@ name: linmail-pdn packages
 # a Debian bookworm container, the arm ones under QEMU) with
 # pdn/packaging/build-in-docker.sh.
 #
-# - A tag linmail-pdn-v<version> builds all three and attaches them to a
-#   GitHub Release.
-# - A push to pdn-linmail that touches the packaging builds all three as
-#   workflow artifacts only (no release), so the cross builds stay proven.
-# - workflow_dispatch builds them as artifacts with a given version.
+# Versions are <LinBPQ version>-pdn<n>: G8BPQ's version from Versions.h, then
+# our own release number for that LinBPQ version, starting at 1.
+#
+# - A tag v<LinBPQ version>-pdn<n> (e.g. v6.0.25.41-pdn1) builds all three as
+#   package version 6.0.25.41-pdn1 and attaches them to a GitHub Release. The
+#   LinBPQ part of the tag must match Versions.h, or nothing is built.
+# - A push to main that touches the packaging builds all three as workflow
+#   artifacts only (no release), so the cross builds stay proven.
+# - workflow_dispatch builds them as artifacts, with a given version or a CI
+#   one.
 
 on:
   push:
     tags:
-      - 'linmail-pdn-v*'
-    branches: [pdn-linmail]
+      - 'v*-pdn*'
+    branches: [main]
     paths:
       - 'pdn/packaging/**'
       - 'pdn/Makefile'
@@ -22,8 +27,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version without the v prefix, e.g. 0.1.0'
-        required: true
+        description: 'Package version, e.g. 6.0.25.41-pdn1 (empty: a CI version)'
+        required: false
 
 permissions:
   contents: read
@@ -46,25 +51,41 @@ jobs:
 
       - id: v
         name: Resolve version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          linbpq=$(make -C pdn -s linbpq-version)
+          echo "LinBPQ version in Versions.h: $linbpq"
           case "$GITHUB_REF" in
-          refs/tags/linmail-pdn-v*) echo "version=${GITHUB_REF#refs/tags/linmail-pdn-v}" >> "$GITHUB_OUTPUT" ;;
+          refs/tags/v*)
+            version=${GITHUB_REF#refs/tags/v}
+            if ! echo "$version" | grep -Eq '^[0-9]+(\.[0-9]+)+-pdn[1-9][0-9]*$'; then
+              echo "::error::tag v$version is not v<LinBPQ version>-pdn<n>"
+              exit 1
+            fi
+            if [ "${version%-pdn*}" != "$linbpq" ]; then
+              echo "::error::tag v$version does not match LinBPQ $linbpq in Versions.h"
+              exit 1
+            fi ;;
           *)
-            if [ -n "${{ github.event.inputs.version }}" ]; then
-              echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            if [ -n "$INPUT_VERSION" ]; then
+              version=$INPUT_VERSION
             else
-              echo "version=0.0.0~ci${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+              version="$linbpq-pdn0~ci${{ github.run_number }}"
             fi ;;
           esac
+          echo "Package version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build the .deb
-        run: pdn/packaging/build-in-docker.sh ${{ matrix.arch }} ${{ steps.v.outputs.version }}
+        run: pdn/packaging/build-in-docker.sh ${{ matrix.arch }} "${{ steps.v.outputs.version }}"
 
       - name: Check the package
         run: |
           deb=$(ls pdn/dist/pdn-linmail_*_${{ matrix.arch }}.deb)
           dpkg-deb -I "$deb"
           dpkg-deb -c "$deb"
+          test "$(dpkg-deb -f "$deb" Version)" = "${{ steps.v.outputs.version }}"
           dpkg-deb -c "$deb" | grep -q ' ./usr/share/packetnet/apps/linmail/pdn-app.yaml$'
           dpkg-deb --fsys-tarfile "$deb" | tar -xO ./usr/share/packetnet/apps/linmail/linmail-pdn > linmail-pdn.bin
           file linmail-pdn.bin
@@ -78,7 +99,7 @@ jobs:
   release:
     name: release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/linmail-pdn-v')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,9 +114,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          version=${TAG#linmail-pdn-v}
+          version=${TAG#v}
+          linbpq=${version%-pdn*}
           ( cd dist && sha256sum pdn-linmail_*.deb > SHA256SUMS && ls -l )
           gh release create "$TAG" dist/pdn-linmail_*.deb dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --title "LinBPQ Mail for pdn $version" \
-            --notes "The LinBPQ mail server as a Packet.NET (pdn) app package, for amd64, arm64 and armhf. Install on a box running the packetnet node: sudo apt install ./pdn-linmail_${version}_<arch>.deb. It lands in /usr/share/packetnet/apps/linmail; enable LinBPQ Mail from the node control panel. State lives in /var/lib/packetnet/apps/linmail and is kept across upgrades. Moving an existing LinBPQ mailbox across: /usr/share/doc/pdn-linmail/MIGRATING.md."
+            --notes "The LinBPQ mail server (G8BPQ's LinBPQ $linbpq) as a Packet.NET (pdn) app package, for amd64, arm64 and armhf. Install on a box running the packetnet node: sudo apt install ./pdn-linmail_${version}_<arch>.deb. It lands in /usr/share/packetnet/apps/linmail; enable LinBPQ Mail from the node control panel. State lives in /var/lib/packetnet/apps/linmail and is kept across upgrades. Moving an existing LinBPQ mailbox across: /usr/share/doc/pdn-linmail/MIGRATING.md. This is a packet.net build, not an official G8BPQ release: please report problems at https://github.com/packet-net/linmail-pdn/issues, not to John."

@@ -387,7 +387,7 @@ def test_real_pdn_app_package_and_gateway(tmp_path):
     manifest = manifest.replace("command: ./linmail-pdn", f"command: ./linmail-pdn\n  args: [-W, \"{ports['web']}\", -t]")
     (pkg / "pdn-app.yaml").write_text(manifest)
     (pkg / "linmail-pdn").symlink_to(BIN)
-    (pkg / "HTML").symlink_to(repo / "HTML")
+    (pkg / "HTML").symlink_to(repo / "pdn" / "HTML")
 
     # Its state (overridden package roots put it in <package>/state): one user
     state = pkg / "state"

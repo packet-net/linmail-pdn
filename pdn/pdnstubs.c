@@ -1,5 +1,5 @@
 /*
-Copyright 2026 the linbpq fork contributors
+Copyright 2026 the linmail-pdn contributors
 
 This file is part of LinBPQ/BPQ32.
 

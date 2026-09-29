@@ -1,43 +1,22 @@
 name: linmail-pdn
 
 # Builds linmail-pdn (the mail server as a standalone packet.net app, see
-# pdn/PLAN.md) and runs its tests: the fake RHP server and web suites, runs
-# against a real pdn node from the latest packet.net release and a LinBPQ
-# built from this tree (including pdn starting the app package and serving
-# its pages through the app gateway), and finally installs the amd64 .deb and
-# runs that against a real pdn.
+# pdn/README.md) and runs its tests: the fake RHP server and web suites, the
+# same under AddressSanitizer, runs against a real pdn node from the latest
+# packet.net release and a LinBPQ built from this tree (including pdn starting
+# the app package and serving its pages through the app gateway), and finally
+# installs the amd64 .deb and runs that against a real pdn. Each step is one
+# stage of pdn/tests/ci.sh, which the upstream sync workflow runs as a whole.
 
 on:
   push:
-    branches: [master, pdn-linmail]
-    paths:
-      - 'pdn/**'
-      - 'BBSUtilities.c'
-      - 'BBSHTMLConfig.c'
-      - 'FBBRoutines.c'
-      - 'MailCommands.c'
-      - 'MailDataDefs.c'
-      - 'MailRouting.c'
-      - 'MailTCP.c'
-      - 'MBLRoutines.c'
-      - 'WPRoutines.c'
-      - 'WebMail.c'
-      - 'NNTPRoutines.c'
-      - 'lzhuf32.c'
-      - 'Housekeeping.c'
-      - 'UIRoutines.c'
-      - 'HTML/**'
-      - 'utf8Routines.c'
-      - 'compatbits.c'
-      - '*.h'
-      - 'tests/integration/helpers/bpqmail_cfg.py'
-      - '.github/workflows/linmail-pdn.yml'
+    branches: [main]
   pull_request:
-    branches: [master]
-    paths:
-      - 'pdn/**'
-      - '.github/workflows/linmail-pdn.yml'
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: linmail-pdn-${{ github.ref }}
@@ -47,75 +26,44 @@ jobs:
   test:
     name: build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libjansson-dev libconfig-dev zlib1g-dev \
-            libminiupnpc-dev libpcap-dev python3-pytest
+        run: pdn/tests/ci.sh deps
 
-      - name: Build linmail-pdn
-        run: make -C pdn -j"$(nproc)"
+      - name: Build linmail-pdn, and with AddressSanitizer
+        run: pdn/tests/ci.sh build
 
-      - name: Build linmail-pdn with AddressSanitizer
-        run: make -C pdn -j"$(nproc)" asan
-
-      - name: Build LinBPQ (for the real pdn test)
-        run: |
-          make -j"$(nproc)" nomqtt \
-            LIBS="-lminiupnpc -lm -lz -lpthread -lconfig -lpcap -ljansson"
-          test -x linbpq
+      - name: Build LinBPQ (for the real pdn tests)
+        run: pdn/tests/ci.sh linbpq
 
       - name: Fetch the latest pdn node release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(gh release list -R packet-net/packet.net --limit 30 --json tagName \
-            -q '[.[] | select(.tagName | startswith("node-v"))][0].tagName')
-          echo "pdn release $tag"
-          mkdir -p "$RUNNER_TEMP/pdn"
-          gh release download "$tag" -R packet-net/packet.net \
-            -p packetnet_amd64.tar.gz -D "$RUNNER_TEMP/pdn"
-          tar xzf "$RUNNER_TEMP/pdn/packetnet_amd64.tar.gz" -C "$RUNNER_TEMP/pdn" ./packetnet
-          echo "PDN_BIN=$RUNNER_TEMP/pdn/packetnet" >> "$GITHUB_ENV"
+        run: pdn/tests/ci.sh pdn
 
       - name: Tests against a fake RHP server, and the web pages
-        run: |
-          python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --ignore=pdn/tests/test_deb.py \
-            --junitxml=reports/linmail-pdn-fake.xml
+        run: pdn/tests/ci.sh fake
 
       - name: The same, under AddressSanitizer
-        env:
-          LINMAIL_PDN_BIN: ${{ github.workspace }}/pdn/linmail-pdn-asan
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --ignore=pdn/tests/test_deb.py \
-            --junitxml=reports/linmail-pdn-asan.xml
+        run: pdn/tests/ci.sh asan
 
       - name: Tests against a real pdn node and LinBPQ
-        env:
-          LINBPQ_BIN: ${{ github.workspace }}/linbpq
-        run: python3 -m pytest pdn/tests/test_real_pdn.py -v -s --junitxml=reports/linmail-pdn-real.xml
+        run: pdn/tests/ci.sh real
 
       - name: Build the amd64 .deb (Debian bookworm container)
-        run: pdn/packaging/build-in-docker.sh amd64 0.0.0~ci${{ github.run_number }}
+        run: pdn/tests/ci.sh debbuild
 
       - name: Install the .deb and run it against a real pdn node
-        env:
-          LINBPQ_BIN: ${{ github.workspace }}/linbpq
-        run: |
-          export LINMAIL_PDN_DEB=$(ls "$PWD"/pdn/dist/pdn-linmail_*_amd64.deb)
-          python3 -m pytest pdn/tests/test_deb.py -v -s --junitxml=reports/linmail-pdn-deb.xml
+        run: pdn/tests/ci.sh deb
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: linmail-pdn-junit
-          path: reports/
+          path: pdn/reports/
           if-no-files-found: warn
