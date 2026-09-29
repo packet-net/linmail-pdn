@@ -5,7 +5,7 @@ LinBPQ Mail on pdn (linmail-pdn) is the same mail server you run in LinBPQ today
 ## Before you start
 
 - You need pdn node 0.58.0 or newer. Older ones can cut off the end of what the BBS sends just before it hangs up (packet.net#850).
-- Install the `pdn-linmail` package on the machine running pdn. It lands in `/usr/share/packetnet/apps/linmail`.
+- Install LinBPQ Mail on the machine running pdn: from Available apps in the control panel (pdn 0.60.0 or newer), or `sudo apt install pdn-linmail` from the packet-net apt repo. It lands in `/usr/share/packetnet/apps/linmail`.
 - In the pdn control panel, open **Apps**, find **LinBPQ Mail** and set its **callsign**. Use your BBS's callsign from bpq32.cfg (the call on your `APPLICATION` line, or `BBSCALL`). Don't enable it yet.
 - Stop LinBPQ, or at least its mail, so nothing is writing to the files while you copy them.
 
