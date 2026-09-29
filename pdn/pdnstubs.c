@@ -149,17 +149,51 @@ int RunEventProgram(char * Program, char * Param)
 	return 0;
 }
 
-//	Web pages. In LinBPQ the node's HTTP server (HTTPcode.c) serves webmail and
-//	the BBS config pages by calling into WebMail.c and BBSHTMLConfig.c. There is
-//	no HTTP server here yet, so these are never reached.
-
-char * GetTemplateFromFile(int Version, char * FN)
-{
-	return _strdup("");
-}
+//	Web page helpers that live in the node's HTTPcode.c and TelnetV6.c. The
+//	pages themselves are served by pdnweb.c.
 
 void UndoTransparency(char * input)
 {
+	// Decode %xx and + in a form or URL (as HTTPcode.c)
+
+	char * ptr1, * ptr2;
+	char c;
+	int hex;
+
+	if (input == NULL)
+		return;
+
+	ptr1 = ptr2 = input;
+
+	while (1)
+	{
+		c = *(ptr1++);
+
+		if (c == 0)
+			break;
+
+		if (c == '%')
+		{
+			c = *(ptr1++);
+			if(isdigit(c))
+				hex = (c - '0') << 4;
+			else
+				hex = (tolower(c) - 'a' + 10) << 4;
+
+			c = *(ptr1++);
+			if(isdigit(c))
+				hex += (c - '0');
+			else
+				hex += (tolower(c) - 'a' + 10);
+
+			*(ptr2++) = hex;
+		}
+		else if (c == '+')
+			*(ptr2++) = 32;
+		else
+			*(ptr2++) = c;
+	}
+	*ptr2 = 0;
 }
 
 int RefreshWebMailIndex()

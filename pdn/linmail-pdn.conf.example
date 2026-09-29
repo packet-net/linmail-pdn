@@ -38,5 +38,14 @@ portmap = 1=vhf, 2=hf
 # Print all RHP traffic
 #trace = 0
 
-# Log directory. Default: the data directory
+# Log directory. Default: the data directory. Keep the path short: the mail
+# code allows about 70 characters.
 #logdir = /var/log/linmail
+
+# Loopback port for webmail and the management pages (pdn's app gateway
+# proxies to it). Must match ui.upstream in pdn-app.yaml. 0 turns them off.
+#web_port = 18095
+
+# Extra directory to look in for the HTML templates, after HTML/ in the data
+# directory. Default: HTML/ beside the linmail-pdn binary
+#html_dir = /usr/share/packetnet/apps/linmail/HTML

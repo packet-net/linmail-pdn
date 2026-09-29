@@ -328,6 +328,8 @@ static char HelpScreen[] =
 	"  -u, --user USER      RHP auth user\n"
 	"  -w, --pass PASS      RHP auth password\n"
 	"  -t, --trace          Print all RHP traffic\n"
+	"  -W, --web-port PORT  Loopback port for webmail through pdn's app gateway\n"
+	"                       (default 18095, 0 = off)\n"
 	"  -h, --help           Show this help\n"
 	"Settings are taken from the settings file, then the environment the pdn app\n"
 	"supervisor sets (PDN_RHP_HOST, PDN_RHP_PORT, PDN_APP_CALLSIGN, PDN_NODE_CALLSIGN,\n"
@@ -348,13 +350,20 @@ static struct option long_options[] =
 	{"user", required_argument, 0, 'u'},
 	{"pass", required_argument, 0, 'w'},
 	{"trace", no_argument, 0, 't'},
+	{"web-port", required_argument, 0, 'W'},
 	{"help", no_argument, 0, 'h'},
 	{NULL, no_argument, NULL, 0}
 };
 
-static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:th";
+static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:tW:h";
 
 static char LogDirOption[260] = "";
+static int WebPort = 18095;
+static char HtmlDir[260] = "";
+
+int PdnWebInit(int Port);
+void PdnWebPoll();
+void PdnWebSetTemplateDirs(char * Configured, char * ExeDir);
 
 static void Copy(char * To, int Max, const char * Value)
 {
@@ -416,6 +425,10 @@ static int SetOption(const char * Key, const char * Value)
 		PdnCfg.Trace = atoi(Value);
 	else if (_stricmp(Key, "logdir") == 0)
 		Copy(LogDirOption, sizeof(LogDirOption), Value);
+	else if (_stricmp(Key, "web_port") == 0)
+		WebPort = atoi(Value);
+	else if (_stricmp(Key, "html_dir") == 0)
+		Copy(HtmlDir, sizeof(HtmlDir), Value);
 	else
 		return FALSE;
 
@@ -507,6 +520,7 @@ static int ArgOption(int c, char * Arg)
 	case 'u': return SetOption("rhp_user", Arg);
 	case 'w': return SetOption("rhp_pass", Arg);
 	case 't': return SetOption("trace", "1");
+	case 'W': return SetOption("web_port", Arg);
 	}
 	return TRUE;
 }
@@ -519,6 +533,7 @@ int main(int argc, char * argv[])
 	char LogDir[260] = "";
 	char DataDir[260] = "";
 	char SettingsFile[300] = "";
+	char * AddUserArgs[3] = {NULL, NULL, NULL};
 	uint64_t NextTick;
 	int i, c;
 
@@ -549,6 +564,22 @@ int main(int argc, char * argv[])
 	strcpy(PdnCfg.RHPHost, "127.0.0.1");
 	PdnCfg.RHPPort = 9000;
 	PdnCfg.DiscLinger = 10;
+
+	// As LinBPQ: --adduser CALL PASSWORD ISBBS adds a user and exits. Take it
+	// out of argv before the options are parsed.
+
+	for (i = 1; i < argc; i++)
+	{
+		if (_stricmp(argv[i], "--adduser") == 0 && i + 3 < argc)
+		{
+			AddUserArgs[0] = argv[i + 1];
+			AddUserArgs[1] = argv[i + 2];
+			AddUserArgs[2] = argv[i + 3];
+			memmove(&argv[i], &argv[i + 4], (argc - i - 4 + 1) * sizeof(char *));
+			argc -= 4;
+			break;
+		}
+	}
 
 	// First pass: only the data directory, the settings file and help
 
@@ -613,6 +644,16 @@ int main(int argc, char * argv[])
 
 	strcpy(ConfigDirectory, BPQDirectory);
 	strcpy(LogDirectory, LogDir[0] ? LogDir : (char *)BPQDirectory);
+
+	// The mail code keeps log file names in 100 byte buffers (FilesNames in
+	// BBSUtilities.c), and a longer name aborts the program. Refuse up front.
+
+	if (strlen(LogDirectory) > 99 - strlen("/logs/log_YYMMDD_CHAT.txt"))
+	{
+		printf("linmail-pdn: the log directory path %s is too long for the mail code (at most %d characters)\n",
+			LogDirectory, (int)(99 - strlen("/logs/log_YYMMDD_CHAT.txt")));
+		return 1;
+	}
 
 	sprintf(LogDir, "%s/logs", LogDirectory);
 	mkdir(LogDir, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -729,16 +770,16 @@ int main(int argc, char * argv[])
 
 	// See if just want to add user (mainly for setup scripts)
 
-	if (argc - optind == 4 && _stricmp(argv[optind], "--adduser") == 0)
+	if (AddUserArgs[0])
 	{
 		BOOL isBBS = FALSE;
 		char * response;
 
-		if (_stricmp(argv[optind + 3], "TRUE") == 0)
+		if (_stricmp(AddUserArgs[2], "TRUE") == 0)
 			isBBS = TRUE;
 
-		printf("Adding User %s\r\n", argv[optind + 1]);
-		response = AddUser(argv[optind + 1], argv[optind + 2], isBBS);
+		printf("Adding User %s\r\n", AddUserArgs[0]);
+		response = AddUser(AddUserArgs[0], AddUserArgs[1], isBBS);
 		printf("%s", response);
 		SaveUserDatabase();
 		exit(0);
@@ -831,6 +872,29 @@ int main(int argc, char * argv[])
 	printf("linmail-pdn: BBS %s answering as %s via pdn RHP %s:%d, %d streams\n",
 		BBSName, PdnCfg.AppCall, PdnCfg.RHPHost, PdnCfg.RHPPort, NumberofStreams);
 
+	// Webmail and the management pages, for pdn's app gateway
+	{
+		char ExeDir[300] = "";
+		ssize_t n = readlink("/proc/self/exe", ExeDir, sizeof(ExeDir) - 1);
+
+		if (n > 0)
+		{
+			char * Slash;
+
+			ExeDir[n] = 0;
+			Slash = strrchr(ExeDir, '/');
+
+			if (Slash)
+				*Slash = 0;
+		}
+
+		if (HtmlDir[0] == 0 && getenv("PDN_APP_DIR"))
+			snprintf(HtmlDir, sizeof(HtmlDir), "%s/HTML", getenv("PDN_APP_DIR"));
+
+		PdnWebSetTemplateDirs(HtmlDir, ExeDir);
+		PdnWebInit(WebPort);
+	}
+
 	// The LinBPQ node loop, mail part only. One tick every 100 ms; the RHP
 	// socket is serviced between ticks.
 
@@ -891,6 +955,7 @@ int main(int argc, char * argv[])
 
 		TCPFastTimer();
 		TrytoSend();
+		PdnWebPoll();
 
 		if (Slowtimer > 100)
 			Slowtimer = 0;

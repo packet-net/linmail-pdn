@@ -19,6 +19,7 @@ import socket
 import subprocess
 import json
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -110,7 +111,11 @@ def session(port, transcript, connect, to, title, read_back=True):
         u.expect(r"\n")
         time.sleep(1)
         u.send(connect)
-        u.expect(r">\s*$", 90)
+        banner = u.expect(r">\s*$", 90)
+        if re.search(r"enter your name", banner, re.I):
+            # A BBS with a default linmail.cfg asks a new user's name first
+            u.send("Tester")
+            u.expect(r">\s*$", 30)
         u.send(f"SP {to}")
         u.expect("Title", 30)
         u.send(title)
@@ -323,3 +328,127 @@ def test_real_pdn_rhp_auth(tmp_path):
                 p.wait(15)
             except subprocess.TimeoutExpired:
                 p.kill()
+
+
+def api(port, method, path, body=None, token=None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method, headers=headers,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            text = r.read().decode("latin-1")
+            return r.status, text
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("latin-1")
+
+
+PACKAGE_PDN_YAML = """\
+schemaVersion: 2
+identity:
+  callsign: N0PDN
+ports: []
+management:
+  telnet:
+    enabled: false
+  http:
+    bind: 127.0.0.1
+    port: {pdn_http}
+  auth:
+    enabled: true
+rhp:
+  enabled: true
+  bind: 127.0.0.1
+  port: {rhp}
+appPackageRoots:
+  - {apps}
+apps:
+  - id: linmail
+    enabled: true
+    callsign: N0LMB
+"""
+
+
+def test_real_pdn_app_package_and_gateway(tmp_path):
+    """pdn discovers the app package, starts linmail-pdn itself, and serves its
+    web pages through the app gateway with the viewer's identity."""
+    ports = {k: free_port() for k in ("pdn_http", "rhp", "web")}
+
+    # The package: manifest (web port changed for the test), binary and templates.
+    # Kept under a short path: the mail code's log file names must fit in 100 bytes.
+    import tempfile
+    tmp_path = Path(tempfile.mkdtemp(prefix="lmpkg", dir="/tmp"))
+    pkg = tmp_path / "apps" / "linmail"
+    pkg.mkdir(parents=True)
+    repo = BIN.parent.parent
+    manifest = (BIN.parent / "packaging" / "pdn-app.yaml").read_text()
+    manifest = manifest.replace("@VERSION@", "test").replace("127.0.0.1:18095", f"127.0.0.1:{ports['web']}")
+    manifest = manifest.replace("command: ./linmail-pdn", f"command: ./linmail-pdn\n  args: [-W, \"{ports['web']}\", -t]")
+    (pkg / "pdn-app.yaml").write_text(manifest)
+    (pkg / "linmail-pdn").symlink_to(BIN)
+    (pkg / "HTML").symlink_to(repo / "HTML")
+
+    # Its state (overridden package roots put it in <package>/state): one user
+    state = pkg / "state"
+    state.mkdir()
+    (state / "linmail.cfg").write_text(linmail_cfg())
+    subprocess.run([str(BIN), "-d", str(state), "--adduser", "N0USR", "x", "FALSE"], check=True,
+                   stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+
+    pdn_dir = tmp_path / "pdn"
+    pdn_dir.mkdir()
+    (pdn_dir / "packetnet.yaml").write_text(PACKAGE_PDN_YAML.format(apps=tmp_path / "apps", **ports))
+    pdn_cmd = ["dotnet", PDN_BIN] if PDN_BIN.endswith(".dll") else [PDN_BIN]
+    pdn = subprocess.Popen(
+        pdn_cmd + ["--config", str(pdn_dir / "packetnet.yaml"), "--db", str(pdn_dir / "pdn.db")],
+        cwd=pdn_dir, stdin=subprocess.DEVNULL, stdout=open(pdn_dir / "pdn.log", "wb"), stderr=subprocess.STDOUT)
+    try:
+        wait_port(ports["pdn_http"], 120)
+
+        # Claim the node, then a second, read-only user named after a callsign
+        status, _ = api(ports["pdn_http"], "POST", "/api/v1/setup",
+                        {"identity": {"callsign": "N0PDN"}, "admin": {"username": "sysop", "password": "linmail-pdn-test-pass"}})
+        assert status in (200, 201)
+        status, text = api(ports["pdn_http"], "POST", "/api/v1/auth/login", {"username": "sysop", "password": "linmail-pdn-test-pass"})
+        assert status == 200, text
+        admin = json.loads(text)["token"]
+        status, text = api(ports["pdn_http"], "POST", "/api/v1/users",
+                           {"username": "N0USR", "password": "n0usr-test-password", "scope": "read"}, admin)
+        assert status in (200, 201), text
+        status, text = api(ports["pdn_http"], "POST", "/api/v1/auth/login", {"username": "N0USR", "password": "n0usr-test-password"})
+        user = json.loads(text)["token"]
+
+        # pdn started linmail-pdn, which bound the callsign pdn gave it
+        wait_file(pdn_dir / "pdn.log", r"listening on N0LMB", 60)
+        wait_port(ports["web"], 30)
+
+        # Straight to the upstream, without the gateway: refused
+        status, _ = api(ports["web"], "GET", "/WebMail")
+        assert status == 403
+
+        # Through the gateway as the admin: the sysop, with the management pages
+        status, body = api(ports["pdn_http"], "GET", "/apps/linmail/", token=admin)
+        assert status == 200 and "BBS user N0LMB" in body and "Mail management" in body, body
+        status, body = api(ports["pdn_http"], "GET", "/apps/linmail/Mail/Header", token=admin)
+        assert status == 200
+        key = re.search(r"/apps/linmail/Mail/Status\?(M[0-9A-F]+)", body).group(1)
+        status, body = api(ports["pdn_http"], "GET", f"/apps/linmail/Mail/Users?{key}", token=admin)
+        assert status == 200 and "UserList.txt" in body
+        status, body = api(ports["pdn_http"], "POST", f"/apps/linmail/Mail/UserList.txt?{key}", body={}, token=admin)
+        assert status == 200 and "N0USR" in body, body
+
+        # As N0USR: their own webmail, and no management pages
+        status, body = api(ports["pdn_http"], "GET", "/apps/linmail/WebMail", token=user)
+        assert status == 200 and "User N0USR" in body and 'src="/apps/linmail/WebMail/webscript.js"' in body
+        status, body = api(ports["pdn_http"], "GET", "/apps/linmail/Mail/Header", token=user)
+        assert status == 403 and "admin rights" in body
+    finally:
+        pdn.send_signal(signal.SIGTERM)
+        try:
+            pdn.wait(20)
+        except subprocess.TimeoutExpired:
+            pdn.kill()
+        print((pdn_dir / "pdn.log").read_bytes().decode("latin-1")[-8000:])
+        import shutil
+        shutil.rmtree(tmp_path, ignore_errors=True)

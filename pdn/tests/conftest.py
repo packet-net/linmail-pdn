@@ -21,15 +21,18 @@ REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "tests" / "integration"))
 sys.path.insert(0, str(HERE))
 
-from helpers.bpqmail_cfg import FwdPartner, render_bpqmail_cfg  # noqa: E402
+from helpers.bpqmail_cfg import FwdPartner, _user_record_string, render_bpqmail_cfg  # noqa: E402
 from fake_rhp import FakeRhp  # noqa: E402
 
 BIN = Path(os.environ.get("LINMAIL_PDN_BIN", HERE.parent / "linmail-pdn"))
 
 
-def linmail_cfg(bbs="N0LMB", partners=(), main_extra: dict | None = None, groups: str = "") -> str:
-    """A linmail.cfg, with extra keys in the main group and extra groups."""
-    text = render_bpqmail_cfg(bbs_call=bbs, sysop_call=bbs, partners=list(partners))
+def linmail_cfg(bbs="N0LMB", partners=(), main_extra: dict | None = None, groups: str = "",
+                sysops=()) -> str:
+    """A linmail.cfg, with extra keys in the main group, extra groups, and
+    extra users flagged sysop."""
+    users = [(call, _user_record_string(name=call, flags=0x08, bbs_number=0)) for call in sysops]
+    text = render_bpqmail_cfg(bbs_call=bbs, sysop_call=bbs, partners=list(partners), extra_users=users)
     for key, value in (main_extra or {}).items():
         line = f"  {key} = {value};"
         text, n = re.subn(rf"^  {re.escape(key)} = .*;$", line, text, count=1, flags=re.M)
@@ -45,6 +48,15 @@ def partner(call="N0BPQ", script=("C 1 N0BPQ-1",), at=None) -> FwdPartner:
                       con_timeout=60)
 
 
+def free_port() -> int:
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 class Linmail:
     """One linmail-pdn process with its own data directory."""
 
@@ -53,12 +65,19 @@ class Linmail:
         self.fake = fake
         self.proc: subprocess.Popen | None = None
         self.out = workdir / "stdout.log"
+        self.web_port = free_port()
 
     def write(self, name: str, text: str):
         (self.dir / name).write_text(text)
 
+    def adduser(self, call: str, password: str = "secret", bbs: bool = False):
+        """linmail-pdn --adduser, as LinBPQ's setup scripts use it."""
+        subprocess.run([str(BIN), "-d", str(self.dir), "--adduser", call, password, "TRUE" if bbs else "FALSE"],
+                       cwd=self.dir, check=True, stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                       env={k: v for k, v in os.environ.items() if not k.startswith("PDN_")})
+
     def start(self, *args: str, env: dict | None = None, rhp: bool = True):
-        argv = [str(BIN), "-d", str(self.dir), "-L", "1", "-t"]
+        argv = [str(BIN), "-d", str(self.dir), "-L", "1", "-t", "-W", str(self.web_port)]
         if rhp:
             argv += ["-r", f"127.0.0.1:{self.fake.port}"]
         argv += list(args)
