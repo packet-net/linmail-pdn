@@ -71,7 +71,6 @@ struct PdnStream
 	int OpenId;					// id of the outstanding open when OPENING
 	int Incoming;
 	int TxOutstanding;			// sends not yet answered by sendReply
-	time_t LastTx;
 	time_t LastActivity;		// Last data either way, for the idle timeout
 	int IdleTime;				// Seconds, as set by ChangeSessionIdletime. 0 = none
 	char Remote[16];
@@ -89,8 +88,8 @@ struct PdnStream
 static struct PdnStream Streams[PDN_MAXSTREAMS];
 static TRANSPORTENTRY Sessions[PDN_MAXSTREAMS];
 
-// Handles we have finished with but not yet closed (disconnect linger), and
-// opens abandoned before their reply arrived
+// Handles we have finished with but not yet closed (a refused caller, given a
+// moment to read why), and opens abandoned before their reply arrived
 
 #define PDN_MAXDEFER 64
 
@@ -1181,7 +1180,6 @@ static void AttachPending()
 				STREAM->Handle = PEND->Child;
 				STREAM->Incoming = 1;
 				STREAM->TxOutstanding = 0;
-				STREAM->LastTx = 0;
 				strcpy(STREAM->Remote, PEND->Remote);
 				strcpy(STREAM->PortLabel, PEND->Port);
 
@@ -1245,7 +1243,7 @@ static void ProcessRecv(json_t * Msg)
 	}
 
 	if (n < 0 || !json_is_string(Data))
-		return;				// Lingering or unknown handle
+		return;				// Unknown handle, or one waiting to close
 
 	Bytes = malloc(json_string_length(Data) + 1);
 	Len = JsonToBytes(Data, Bytes, (int)json_string_length(Data) + 1);
@@ -1634,7 +1632,7 @@ void PdnHostPoll(int WaitMs)
 	AttachPending();
 	FinishRemoteClose();
 
-	// Close handles whose linger has expired
+	// Close handles whose wait is over
 
 	for (i = 0; i < PDN_MAXDEFER; i++)
 	{
@@ -1793,18 +1791,13 @@ DllExport int APIENTRY SessionControl(int stream, int command, int Mask)
 			return 0;
 		}
 
+		// Close at once. pdn keeps the link up until the far end has
+		// everything already sent, then disconnects (packet.net#850). No
+		// handle means pdn has closed the link already, so there is nothing
+		// to close.
+
 		if (STREAM->Mode == PDN_LINKED && STREAM->Handle)
-		{
-			// Give pdn time to get the last of our data on air before the
-			// close. pdn discards unsent data when a link is closed.
-
-			time_t CloseAt = STREAM->LastTx + PdnCfg.DiscLinger;
-
-			if (CloseAt <= time(NULL))
-				RHPClose(STREAM->Handle);
-			else
-				AddDeferred(STREAM->Handle, 0, CloseAt);
-		}
+			RHPClose(STREAM->Handle);
 		else if (STREAM->Mode == PDN_OPENING)
 			AddDeferred(0, STREAM->OpenId, 0);
 
@@ -1830,7 +1823,6 @@ DllExport int APIENTRY SessionControl(int stream, int command, int Mask)
 	STREAM->CmdLen = 0;
 	STREAM->Handle = 0;
 	STREAM->TxOutstanding = 0;
-	STREAM->LastTx = 0;
 	strcpy(STREAM->Remote, "SWITCH");
 
 	StartSession(n, PdnCfg.AppCall);
@@ -1960,7 +1952,6 @@ DllExport int APIENTRY SendMsg(int stream, char * msg, int len)
 		json_object_set_new(Msg, "data", BytesToJson(msg, len));
 
 		STREAM->TxOutstanding++;
-		STREAM->LastTx = time(NULL);
 		RHPSend(Msg);
 		break;
 	}

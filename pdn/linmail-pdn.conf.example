@@ -32,9 +32,6 @@ portmap = 1=vhf, 2=hf
 # the same node can be reached that way.
 #default_port = vhf
 
-# Seconds to hold a close after the last data sent
-#linger = 10
-
 # Print all RHP traffic
 #trace = 0
 

@@ -453,7 +453,6 @@ static char HelpScreen[] =
 	"  -m, --portmap MAP    Connect script port numbers to pdn port ids,\n"
 	"                       e.g. 1=vhf,2=hf\n"
 	"  -p, --defport ID     pdn port for a connect line with no port\n"
-	"  -L, --linger SECS    Hold a close this long after our last send (default 10)\n"
 	"  -u, --user USER      RHP auth user\n"
 	"  -w, --pass PASS      RHP auth password\n"
 	"  -t, --trace          Print all RHP traffic\n"
@@ -476,7 +475,6 @@ static struct option long_options[] =
 	{"node", required_argument, 0, 'n'},
 	{"portmap", required_argument, 0, 'm'},
 	{"defport", required_argument, 0, 'p'},
-	{"linger", required_argument, 0, 'L'},
 	{"user", required_argument, 0, 'u'},
 	{"pass", required_argument, 0, 'w'},
 	{"trace", no_argument, 0, 't'},
@@ -486,7 +484,7 @@ static struct option long_options[] =
 	{NULL, no_argument, NULL, 0}
 };
 
-static char OptString[] = "d:f:l:r:c:a:n:m:p:L:u:w:tW:hV";
+static char OptString[] = "d:f:l:r:c:a:n:m:p:u:w:tW:hV";
 
 static char LogDirOption[260] = "";
 static int WebPort = 18095;
@@ -550,8 +548,6 @@ static int SetOption(const char * Key, const char * Value)
 	}
 	else if (_stricmp(Key, "default_port") == 0)
 		Copy(PdnCfg.DefaultPort, sizeof(PdnCfg.DefaultPort), Value);
-	else if (_stricmp(Key, "linger") == 0)
-		PdnCfg.DiscLinger = atoi(Value);
 	else if (_stricmp(Key, "trace") == 0)
 		PdnCfg.Trace = atoi(Value);
 	else if (_stricmp(Key, "logdir") == 0)
@@ -647,7 +643,6 @@ static int ArgOption(int c, char * Arg)
 	case 'n': return SetOption("node", Arg);
 	case 'm': return SetOption("portmap", Arg);
 	case 'p': return SetOption("default_port", Arg);
-	case 'L': return SetOption("linger", Arg);
 	case 'u': return SetOption("rhp_user", Arg);
 	case 'w': return SetOption("rhp_pass", Arg);
 	case 't': return SetOption("trace", "1");
@@ -692,7 +687,6 @@ int main(int argc, char * argv[])
 
 	strcpy(PdnCfg.RHPHost, "127.0.0.1");
 	PdnCfg.RHPPort = 9000;
-	PdnCfg.DiscLinger = 10;
 
 	// As LinBPQ: --adduser CALL PASSWORD ISBBS adds a user and exits. Take it
 	// out of argv before the options are parsed.

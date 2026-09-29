@@ -12,7 +12,8 @@
 #   pdn       fetch the latest pdn node release (needs gh and GH_TOKEN)
 #   fake      the fake RHP server and web suites
 #   asan      the same, under AddressSanitizer
-#   real      against a real pdn node and LinBPQ
+#   real      against a real pdn node and LinBPQ (the close test is skipped,
+#             with the reason shown, while the latest pdn is 0.57.0 or older)
 #   debbuild  build the amd64 .deb in a Debian bookworm container (docker)
 #   deb       install the .deb and run it against a real pdn node (sudo)
 #
@@ -97,7 +98,7 @@ stage_asan() {
 stage_real() {
 	need pdn/linmail-pdn "$PDN_BIN" "$LINBPQ_BIN"
 	say "Tests against a real pdn node and LinBPQ"
-	python3 -m pytest -p no:cacheprovider pdn/tests/test_real_pdn.py -v -s --junitxml=pdn/reports/linmail-pdn-real.xml
+	python3 -m pytest -p no:cacheprovider pdn/tests/test_real_pdn.py -v -s -rs --junitxml=pdn/reports/linmail-pdn-real.xml
 }
 
 stage_debbuild() {

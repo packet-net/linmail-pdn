@@ -109,6 +109,21 @@ def test_user_session(linmail, fake):
     linmail.wait_bbslog(r"N0USR\s+N0USR Disconnected")
 
 
+def test_closes_straight_after_the_last_send(linmail, fake):
+    """No wait before the close: pdn keeps the link up until the far end has
+    everything sent before it (packet.net#850), so the shim closes as soon as
+    the mail code disconnects. BYE signs off, then disconnects a second later."""
+    linmail.write("linmail.cfg", linmail_cfg())
+    linmail.start()
+    fake.wait_msg("listenReply", direction="out")
+    h = login(fake)
+    start = time.time()
+    fake.recv(h, "B\r")
+    fake.wait(lambda: fake.closed(h), timeout=8, what="linmail-pdn to close the session")
+    assert time.time() - start < 5
+    ours = [m for d, m in fake.log if d == "in" and m.get("handle") == h]
+    assert ours[-1]["type"] == "close" and ours[-2]["type"] == "send"
+
 def test_refuses_peer_that_is_not_a_callsign(linmail, fake):
     linmail.write("linmail.cfg", linmail_cfg())
     linmail.start()
