@@ -1,0 +1,95 @@
+name: linmail-pdn
+
+# Builds linmail-pdn (the mail server as a standalone packet.net app, see
+# pdn/PLAN.md) and runs its tests: the fake RHP server suite, then one run
+# against a real pdn node from the latest packet.net release and a LinBPQ
+# built from this tree.
+
+on:
+  push:
+    branches: [master, pdn-linmail]
+    paths:
+      - 'pdn/**'
+      - 'BBSUtilities.c'
+      - 'BBSHTMLConfig.c'
+      - 'FBBRoutines.c'
+      - 'MailCommands.c'
+      - 'MailDataDefs.c'
+      - 'MailRouting.c'
+      - 'MailTCP.c'
+      - 'MBLRoutines.c'
+      - 'WPRoutines.c'
+      - 'WebMail.c'
+      - 'NNTPRoutines.c'
+      - 'lzhuf32.c'
+      - 'Housekeeping.c'
+      - 'UIRoutines.c'
+      - 'utf8Routines.c'
+      - 'compatbits.c'
+      - '*.h'
+      - 'tests/integration/helpers/bpqmail_cfg.py'
+      - '.github/workflows/linmail-pdn.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'pdn/**'
+      - '.github/workflows/linmail-pdn.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: linmail-pdn-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libjansson-dev libconfig-dev zlib1g-dev \
+            libminiupnpc-dev libpcap-dev python3-pytest
+
+      - name: Build linmail-pdn
+        run: make -C pdn -j"$(nproc)"
+
+      - name: Build LinBPQ (for the real pdn test)
+        run: |
+          make -j"$(nproc)" nomqtt \
+            LIBS="-lminiupnpc -lm -lz -lpthread -lconfig -lpcap -ljansson"
+          test -x linbpq
+
+      - name: Fetch the latest pdn node release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list -R packet-net/packet.net --limit 30 --json tagName \
+            -q '[.[] | select(.tagName | startswith("node-v"))][0].tagName')
+          echo "pdn release $tag"
+          mkdir -p "$RUNNER_TEMP/pdn"
+          gh release download "$tag" -R packet-net/packet.net \
+            -p packetnet_amd64.tar.gz -D "$RUNNER_TEMP/pdn"
+          tar xzf "$RUNNER_TEMP/pdn/packetnet_amd64.tar.gz" -C "$RUNNER_TEMP/pdn" ./packetnet
+          echo "PDN_BIN=$RUNNER_TEMP/pdn/packetnet" >> "$GITHUB_ENV"
+
+      - name: Tests against a fake RHP server
+        run: python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --junitxml=reports/linmail-pdn-fake.xml
+
+      - name: Test against a real pdn node and LinBPQ
+        env:
+          LINBPQ_BIN: ${{ github.workspace }}/linbpq
+        run: python3 -m pytest pdn/tests/test_real_pdn.py -v -s --junitxml=reports/linmail-pdn-real.xml
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linmail-pdn-junit
+          path: reports/
+          if-no-files-found: warn
