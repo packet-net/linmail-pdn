@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,6 +25,37 @@ from bpqmail_cfg import FwdPartner, _user_record_string, render_bpqmail_cfg  # n
 from fake_rhp import FakeRhp  # noqa: E402
 
 BIN = Path(os.environ.get("LINMAIL_PDN_BIN", HERE.parent / "linmail-pdn"))
+UPSTREAM = HERE.parents[1]
+
+
+def upstream_log_names() -> tuple[int, int, list[str]]:
+    """From BBSUtilities.c: how many FilesNames entries there are, how long
+    each is, and the names in Logs. The mail code builds each log file name
+    as "<log dir>/logs/log_YYMMDD_<name>.txt" and strcpy's it into one of
+    those buffers."""
+    src = (UPSTREAM / "BBSUtilities.c").read_text(errors="replace")
+    count, size = map(int, re.search(r"^char FilesNames\[(\d+)\]\[(\d+)\]", src, re.M).groups())
+    names = re.findall(r'"([^"]*)"', re.search(r"^char \* Logs\[\d+\] = \{([^}]*)\}", src, re.M).group(1))
+    assert '"%s/logs/log_%02d%02d%02d_%s.txt", GetLogDirectory()' in src, \
+        "OpenLogfile's log file name format changed: check LogDirLimit in linmail-pdn.c"
+    return count, size, names
+
+
+def log_dir_limit() -> int:
+    """The longest log directory path for which every log file name fits."""
+    _, size, names = upstream_log_names()
+    return size - 1 - max(len(f"/logs/log_YYMMDD_{name}.txt") for name in names)
+
+
+@pytest.fixture
+def short_tmp():
+    """A fresh directory with a short path under /tmp. The mail code's log
+    file names must fit in 100 bytes (see log_dir_limit), and pytest's
+    tmp_path, which grows with the user and test names, can run past that on
+    a CI runner. Use this wherever linmail-pdn or LinBPQ's own mail runs."""
+    path = Path(tempfile.mkdtemp(prefix="lm", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def linmail_cfg(bbs="N0LMB", partners=(), main_extra: dict | None = None, groups: str = "",

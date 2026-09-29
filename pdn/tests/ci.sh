@@ -13,7 +13,7 @@
 #   fake      the fake RHP server and web suites
 #   asan      the same, under AddressSanitizer
 #   real      against a real pdn node and LinBPQ (the close test is skipped,
-#             with the reason shown, while the latest pdn is 0.57.0 or older)
+#             with the reason shown, for a pdn of 0.57.0 or older)
 #   debbuild  build the amd64 .deb in a Debian bookworm container (docker)
 #   deb       install the .deb and run it against a real pdn node (sudo)
 #
