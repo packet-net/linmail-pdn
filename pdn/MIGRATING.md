@@ -40,7 +40,9 @@ The same numbers pick the ports for mail-for beacons (the `UIPort` settings in `
 
 Enable **LinBPQ Mail** in the control panel. pdn starts it, and it answers on the callsign you set. Stations can connect to that call directly, or type `MAIL` at the node prompt. Webmail and the mail management pages open from the app's entry in the panel.
 
-Webmail uses your pdn login instead of the BBS password. If your pdn username is a callsign, you get that BBS user's mailbox. Node admins get the management pages, and an admin whose username isn't a callsign is treated as the BBS sysop.
+Webmail uses your pdn login instead of the BBS password. If your pdn username is a callsign with an account on the BBS, you get that mailbox. A pdn username that's a callsign with no BBS account yet gets a message saying so: connect to the BBS over the air once to create it.
+
+Node admins always get the management pages, acting as the BBS sysop, even with no BBS account of their own. An admin whose username isn't a callsign also gets the sysop's mailbox in webmail.
 
 ## What's different from LinBPQ
 

@@ -62,6 +62,9 @@ jobs:
       - name: Build linmail-pdn
         run: make -C pdn -j"$(nproc)"
 
+      - name: Build linmail-pdn with AddressSanitizer
+        run: make -C pdn -j"$(nproc)" asan
+
       - name: Build LinBPQ (for the real pdn test)
         run: |
           make -j"$(nproc)" nomqtt \
@@ -85,6 +88,14 @@ jobs:
         run: |
           python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --ignore=pdn/tests/test_deb.py \
             --junitxml=reports/linmail-pdn-fake.xml
+
+      - name: The same, under AddressSanitizer
+        env:
+          LINMAIL_PDN_BIN: ${{ github.workspace }}/pdn/linmail-pdn-asan
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          python3 -m pytest pdn/tests -v --ignore=pdn/tests/test_real_pdn.py --ignore=pdn/tests/test_deb.py \
+            --junitxml=reports/linmail-pdn-asan.xml
 
       - name: Tests against a real pdn node and LinBPQ
         env:

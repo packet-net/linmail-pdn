@@ -36,14 +36,23 @@ STATIC_LIBS = -Wl,-Bstatic -ljansson -lconfig -Wl,-Bdynamic -lm -lz -lpthread
 UPSTREAM_OBJS = $(addprefix $(BUILD)/,$(MAIL_SRCS:.c=.o) $(SUPPORT_SRCS:.c=.o))
 SHIM_OBJS = $(addprefix $(BUILD)/,$(SHIM_SRCS:.c=.o))
 
-all: linmail-pdn
+OUT = linmail-pdn
 
-linmail-pdn: $(UPSTREAM_OBJS) $(SHIM_OBJS)
+all: $(OUT)
+
+$(OUT): $(UPSTREAM_OBJS) $(SHIM_OBJS)
 	$(CC) $(UPSTREAM_OBJS) $(SHIM_OBJS) $(LIBS) -o $@
 
 # make -C pdn static: the packaged build
 static: $(UPSTREAM_OBJS) $(SHIM_OBJS)
 	$(CC) $(UPSTREAM_OBJS) $(SHIM_OBJS) $(STATIC_LIBS) -o linmail-pdn
+
+# make -C pdn asan: linmail-pdn-asan, built with AddressSanitizer in its own
+# build directory, for the tests (see .github/workflows/linmail-pdn.yml)
+asan:
+	$(MAKE) BUILD=build-asan OUT=linmail-pdn-asan \
+		EXTRA_CFLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+		LIBS="-fsanitize=address $(LIBS)"
 
 # make -C pdn deb ARCH=amd64 VERSION=0.1.0: a .deb in pdn/dist (see packaging/build-deb.sh)
 deb: static
@@ -61,6 +70,6 @@ $(BUILD):
 -include $(BUILD)/*.d
 
 clean:
-	rm -rf $(BUILD) linmail-pdn dist
+	rm -rf $(BUILD) build-asan linmail-pdn linmail-pdn-asan dist
 
-.PHONY: all clean static deb
+.PHONY: all clean static deb asan

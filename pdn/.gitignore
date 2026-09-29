@@ -1,3 +1,5 @@
 build/
+build-asan/
 linmail-pdn
+linmail-pdn-asan
 dist/
