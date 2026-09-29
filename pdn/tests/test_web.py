@@ -43,6 +43,10 @@ def multipart(fields: dict) -> tuple[bytes, str]:
 @pytest.fixture
 def web(linmail, fake):
     linmail.write("linmail.cfg", linmail_cfg(sysops=["N0SYS"]))
+    # One webmail form template folder, so the template pages have something to list
+    forms = linmail.dir / "Standard_Templates" / "General"
+    forms.mkdir(parents=True)
+    (forms / "Test.txt").write_text("Form: Test.html\n")
     linmail.adduser("N0USR")
     linmail.adduser("N0OTH")
     linmail.start()
@@ -135,3 +139,83 @@ def test_sysop_bbs_account_needs_admin(web):
     assert status == 403 and "needs admin rights" in body
     status, body = get(web, "/WebMail", user="N0SYS", scope="admin")
     assert status == 200 and "User N0SYS" in body
+
+
+def webmail_key(web, user="N0USR", scope="read"):
+    _, body = get(web, "/WebMail", user=user, scope=scope)
+    return re.search(r"WMB\?(W[0-9A-F]+)", body).group(1)
+
+
+def test_forged_host_refused(web):
+    # DNS rebinding: a browser sent here under another name, with made-up X-Pdn headers
+    status, body = get(web, "/WebMail", user="N0USR", headers={"Host": f"evil.example:{web.web_port}"})
+    assert status == 403
+    status, _ = get(web, "/WebMail", user="N0USR", headers={"Host": f"localhost:{web.web_port}"})
+    assert status == 200
+
+
+def test_callsign_admin_without_bbs_account(web):
+    # The first-run case: the node owner (M0ABC) has no BBS account yet
+    status, body = get(web, "/", user="M0ABC", scope="admin")
+    assert status == 200 and "no BBS account for M0ABC" in body and "Mail management" in body
+    status, body = get(web, "/Mail/Header", user="M0ABC", scope="admin")
+    assert status == 200 and "/apps/linmail/Mail/Conf?" in body
+    status, body = get(web, "/WebMail", user="M0ABC", scope="admin")
+    assert status == 403 and "Webmail needs one" in body and "Mail management" in body
+    # Without admin it is a plain refusal
+    status, body = get(web, "/Mail/Header", user="M0ABC", scope="read")
+    assert status == 403 and "no BBS account for M0ABC" in body
+
+
+def test_percent_at_end_of_form_field(web):
+    key = webmail_key(web)
+    data, ctype = multipart({"To": "N0ABC", "Subj": "100%", "Type": "P", "BID": "%",
+                             "Msg": "Ends in a percent sign %", "Send": "Send"})
+    status, _ = get(web, f"/WebMail/EMSave?{key}", user="N0USR", data=data, headers={"Content-Type": ctype})
+    assert status == 200
+    web.wait_bbslog(r"Routing Trace To N0ABC")
+    # The template list decodes every field (UndoTransparency)
+    for body in ("Ends in a percent sign %", "Ends in %4", "%zz and %"):
+        data, ctype = multipart({"To": "N0ABC%", "Subj": "100%", "Type": "P", "BID": "%", "Msg": body})
+        status, _ = get(web, f"/WebMail/GetTemplates?{key}", user="N0USR", data=data, headers={"Content-Type": ctype})
+        assert status == 200
+    assert get(web, "/health", gateway=False)[0] == 200
+
+
+def test_templates_post_without_fields(web):
+    # UPSTREAM-BUGS.md 1: the template list reads BID (and To, Subj, Msg) unchecked
+    key = webmail_key(web)
+    data, ctype = multipart({"Type": "P"})
+    status, body = get(web, f"/WebMail/GetTemplates?{key}", user="N0USR", data=data, headers={"Content-Type": ctype})
+    assert status == 200 and "Select Required Template" in body
+    # And compose with nothing but a type
+    status, _ = get(web, f"/WebMail/EMSave?{key}", user="N0USR", data=data, headers={"Content-Type": ctype})
+    assert status == 200
+    assert get(web, "/health", gateway=False)[0] == 200
+
+
+def test_template_folder_out_of_range(web):
+    # UPSTREAM-BUGS.md 2: folder and form numbers index tables unchecked
+    key = webmail_key(web)
+    status, body = get(web, f"/WebMail/GetList/0?{key}", user="N0USR")
+    assert status == 200 and "Test.txt" in body
+    for path in ("GetList/100000", "GetList/0:5", "GetList/abc", "GetPage/100000", "GetPage/0,99", "GetPage/-1"):
+        status, body = get(web, f"/WebMail/{path}?{key}", user="N0USR")
+        assert status == 400, path
+    assert get(web, "/health", gateway=False)[0] == 200
+
+
+def test_half_closed_client_gets_its_reply(web):
+    import socket
+    s = socket.create_connection(("127.0.0.1", web.web_port))
+    s.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    s.shutdown(socket.SHUT_WR)
+    s.settimeout(5)
+    reply = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        reply += chunk
+    s.close()
+    assert reply.startswith(b"HTTP/1.1 200") and reply.endswith(b"ok\n")

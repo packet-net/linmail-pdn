@@ -299,3 +299,36 @@ def test_smtp_pop3_nntp_never_start(linmail, fake):
     saved = (linmail.dir / "linmail.cfg").read_text()
     for key, port in ports.items():
         assert f"{key} = {port};" in saved
+
+
+def test_data_then_hangup_is_not_lost(linmail, fake):
+    """A message ending /EX followed at once by a hangup, both in one read."""
+    linmail.write("linmail.cfg", linmail_cfg())
+    linmail.start()
+    fake.wait_msg("listenReply", direction="out")
+    h = login(fake)
+    start = len(fake.sent[h])
+    fake.recv(h, "SP N0ABC\r")
+    fake.wait_text(h, "Title", start=start)
+    fake.recv(h, "Hangup test\r")
+    fake.wait_text(h, "Message", start=start)
+    fake.push_together(
+        {"type": "recv", "handle": h, "data": "Last words before the link drops\r/EX\r"},
+        {"type": "close", "handle": h})
+    linmail.wait_bbslog(r"Routing Trace To N0ABC")
+    linmail.wait_bbslog(r"N0USR\s+N0USR Disconnected")
+    log = linmail.bbslog()
+    assert log.index("Routing Trace To N0ABC") < log.index("N0USR Disconnected")
+
+
+def test_bare_else_in_connect_script(linmail, fake):
+    """A bare ELSE after a failed connect (checked for "ELSE DELAY n"; see UPSTREAM-BUGS.md 3)."""
+    script = ("C 1 N0ZZZ", "ELSE", "C 1 N0BPQ-1")
+    linmail.write("linmail.cfg", linmail_cfg(partners=[partner(script=script)]))
+    fake.on_open = lambda m: (15, "no answer") if m["remote"] == "N0ZZZ" else (0, "Ok")
+    linmail.start("-m", "1=bpq", "-n", "N0PDN")
+    fake.wait_msg("listenReply", direction="out")
+    h = login(fake)
+    post(fake, h, "N0ABC @ N0BPQ", "Else test", ["x"])
+    linmail.wait_bbslog(r"N0PDN\} Failure with N0ZZZ", timeout=30)
+    linmail.wait_bbslog(r"N0PDN\} Connected to N0BPQ-1", timeout=30)

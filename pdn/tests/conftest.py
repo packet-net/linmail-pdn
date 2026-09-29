@@ -82,6 +82,7 @@ class Linmail:
             argv += ["-r", f"127.0.0.1:{self.fake.port}"]
         argv += list(args)
         full_env = {k: v for k, v in os.environ.items() if not k.startswith("PDN_")}
+        full_env["PDN_APP_DIR"] = str(REPO)       # so the HTML templates are found wherever the binary is
         full_env.update(env or {})
         self.proc = subprocess.Popen(argv, cwd=self.dir, env=full_env, stdin=subprocess.DEVNULL,
                                      stdout=open(self.out, "wb"), stderr=subprocess.STDOUT)
@@ -138,3 +139,6 @@ def linmail(tmp_path, fake):
     if lm.proc:
         # Keep the evidence in the pytest output when something fails
         print(lm.stdout()[-5000:])
+        # Under an AddressSanitizer build (as CI runs one), any memory error fails the test
+        assert "ERROR: AddressSanitizer" not in lm.stdout(), "AddressSanitizer reported an error"
+        assert lm.proc.returncode in (0, -15), f"linmail-pdn exited with {lm.proc.returncode}"

@@ -187,6 +187,22 @@ class FakeRhp:
         msg["seqno"] = self._next_seqno()
         self._write(msg)
 
+    def push_together(self, *msgs: dict):
+        """Several pushes in one TCP write, so linmail-pdn reads them at once."""
+        data = b""
+        for msg in msgs:
+            msg = dict(msg)
+            msg["seqno"] = self._next_seqno()
+            with self.lock:
+                self.log.append(("out", msg))
+            body = json.dumps(msg).encode("utf-8")
+            data += struct.pack(">H", len(body)) + body
+        with self.lock:
+            conn = self.conn
+            self.lock.notify_all()
+        if conn:
+            conn.sendall(data)
+
     def accept(self, remote: str, local: str = "N0LMB", port: str = "bpq") -> int:
         """A station connects to a callsign linmail-pdn listens on."""
         listener = self.wait(lambda: next((h for h, v in list(self.handles.items())

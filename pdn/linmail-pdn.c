@@ -62,6 +62,7 @@ extern UCHAR LogDirectory[260];
 extern UCHAR ConfigDirectory[260];
 
 extern ConnectionInfo Connections[];
+extern struct UserInfo * BBSChain;
 extern int NumberofStreams;
 extern int MaxStreams;
 extern int BBSApplNum;
@@ -267,6 +268,67 @@ void FreeSemaphore(struct SEM * Semaphore)
 
 	Semaphore->Rels++;
 	Semaphore->Flag = 0;
+}
+
+//	Connect script ELSE lines. After a failed connect, ProcessBBSConnectScript
+//	(BBSUtilities.c) checks for "ELSE DELAY n" by comparing the five bytes at
+//	Cmd[5], which for a bare "ELSE" line lie past the end of the string. Give
+//	every short ELSE line enough zeroed room that the check reads only its own
+//	memory. Lines are only ever replaced once; the table remembers which. See
+//	pdn/UPSTREAM-BUGS.md.
+
+#define MAXPADDED 1024
+
+static char * Padded[MAXPADDED];
+static int PaddedCount = 0;
+
+static void PadElseList(char ** Script)
+{
+	int i, j;
+
+	if (Script == NULL)
+		return;
+
+	for (i = 0; Script[i]; i++)
+	{
+		char * Line = Script[i];
+		size_t Len = strlen(Line);
+
+		if (Len >= 10 || _memicmp(Line, "ELSE", 4) != 0)
+			continue;
+
+		for (j = 0; j < PaddedCount; j++)
+			if (Padded[j] == Line)
+				break;
+
+		if (j < PaddedCount)
+			continue;				// Already done
+
+		{
+			char * New = zalloc(16);
+
+			memcpy(New, Line, Len);
+			Script[i] = New;
+			free(Line);
+
+			if (PaddedCount < MAXPADDED)
+				Padded[PaddedCount++] = New;
+		}
+	}
+}
+
+static void PadElseLines()
+{
+	struct UserInfo * user;
+
+	for (user = BBSChain; user; user = user->BBSNext)
+	{
+		if (user->ForwardingInfo)
+		{
+			PadElseList(user->ForwardingInfo->ConnectScript);
+			PadElseList(user->ForwardingInfo->TempConnectScript);
+		}
+	}
 }
 
 //	The mail stream poll from LinBPQ.c
@@ -919,6 +981,7 @@ int main(int argc, char * argv[])
 
 		Slowtimer++;
 
+		PadElseLines();
 		PollStreams();
 
 		if ((Slowtimer % 20) == 0)

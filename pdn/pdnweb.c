@@ -59,6 +59,23 @@ struct HTTPConnectionInfo * FindWMSession(char * Key);
 extern char BBSName[];
 extern char SYSOPCall[];
 
+// The webmail form template folders (WebMail.c). The first fields of struct
+// HtmlFormDir there, which the request checks below read. Keep in step with
+// WebMail.c.
+
+struct HtmlFormDir
+{
+	char * FormSet;
+	char * DirName;
+	void ** Forms;
+	int FormCount;
+	struct HtmlFormDir ** Dirs;
+	int DirCount;
+};
+
+extern struct HtmlFormDir ** HtmlFormDirs;
+extern int FormDirCount;
+
 struct WebConn
 {
 	int Sock;
@@ -66,6 +83,7 @@ struct WebConn
 	char * Buf;
 	int Len;
 	int Size;
+	int PeerClosed;
 };
 
 static struct WebConn Conns[WEB_MAXCONN];
@@ -601,6 +619,154 @@ static struct HTTPConnectionInfo * MailSessionFor(char * Key, char * Owner, stru
 	}
 }
 
+//	Requests that crash the upstream webmail code are stopped here. See
+//	pdn/UPSTREAM-BUGS.md.
+
+static int ParseFolderRef(char * p, int * Dir, int * Sub, int * File)
+{
+	// <folder>[:<subfolder>][,<form>] as the template pages build them (the
+	// upstream code finds ':' and ',' anywhere, so accept them in either order)
+
+	*Sub = *File = -1;
+
+	if (p[0] == '-' && p[1] == '1')
+	{
+		*Dir = -1;
+		p += 2;
+	}
+	else
+	{
+		if (!isdigit((unsigned char)*p))
+			return FALSE;
+
+		*Dir = atoi(p);
+
+		while (isdigit((unsigned char)*p))
+			p++;
+	}
+
+	while (*p == ':' || *p == ',')
+	{
+		int * Target = *p == ':' ? Sub : File;
+
+		p++;
+
+		if (*Target != -1 || !isdigit((unsigned char)*p))
+			return FALSE;
+
+		*Target = atoi(p);
+
+		while (isdigit((unsigned char)*p))
+			p++;
+	}
+
+	return *p == 0 || *p == '?';
+}
+
+static struct HtmlFormDir * FolderFor(int Dir, int Sub)
+{
+	struct HtmlFormDir * D;
+
+	if (HtmlFormDirs == NULL || Dir < 0 || Dir >= FormDirCount || (D = HtmlFormDirs[Dir]) == NULL)
+		return NULL;
+
+	if (Sub >= 0)
+	{
+		if (D->Dirs == NULL || Sub >= D->DirCount)
+			return NULL;
+
+		D = D->Dirs[Sub];
+	}
+	return D;
+}
+
+static int WebMailRequestSafe(char * URL, char * Method, struct HTTPConnectionInfo * WM, char * Why, int WhyLen)
+{
+	int Dir, Sub, File;
+
+	if (_memicmp(URL, "/WebMail/GetList/", 17) == 0)
+	{
+		// The template folder list indexes the folder tables without a bounds
+		// check (UPSTREAM-BUGS.md 2). It turns folder -1 into 0.
+
+		if (!ParseFolderRef(&URL[17], &Dir, &Sub, &File) || File != -1
+			|| FolderFor(Dir == -1 ? 0 : Dir, Sub) == NULL)
+		{
+			snprintf(Why, WhyLen, "That template folder does not exist.");
+			return FALSE;
+		}
+		return TRUE;
+	}
+
+	if (_memicmp(URL, "/WebMail/GetPage/", 17) == 0)
+	{
+		// The same for a template page, which also indexes the forms in the
+		// folder (and reads folder -1 before rejecting it)
+
+		struct HtmlFormDir * D;
+
+		if (!ParseFolderRef(&URL[17], &Dir, &Sub, &File) || (D = FolderFor(Dir, Sub)) == NULL
+			|| (File == -1 ? 0 : File) >= D->FormCount)
+		{
+			snprintf(Why, WhyLen, "That template does not exist.");
+			return FALSE;
+		}
+		return TRUE;
+	}
+
+	if (_memicmp(URL, "/WebMail/GetTemplates", 21) == 0 && (HtmlFormDirs == NULL || FormDirCount == 0))
+	{
+		// The template list assumes at least one template folder
+
+		snprintf(Why, WhyLen, "No message templates are installed on this BBS.");
+		return FALSE;
+	}
+
+	if (strcmp(Method, "POST") == 0 && WM && WM->WebMail)
+	{
+		// The form handlers (compose, templates) use To, Subj, BID and Msg
+		// without checking the form sent them (UPSTREAM-BUGS.md 1). Missing
+		// means empty.
+
+		WebMailInfo * W = WM->WebMail;
+
+		if (W->To == NULL) W->To = _strdup("");
+		if (W->Subject == NULL) W->Subject = _strdup("");
+		if (W->BID == NULL) W->BID = _strdup("");
+		if (W->Body == NULL) W->Body = _strdup("");
+	}
+	return TRUE;
+}
+
+static int LoopbackHost(char * Request)
+{
+	char Host[300];
+	char * Port;
+
+	if (GetHeader(Request, "Host", Host, sizeof(Host)) == NULL)
+		return FALSE;
+
+	// Strip the port: host:port, or [v6]:port
+
+	if (Host[0] == '[')
+	{
+		char * End = strchr(Host, ']');
+
+		if (End == NULL)
+			return FALSE;
+
+		*End = 0;
+		return strcmp(&Host[1], "::1") == 0;
+	}
+
+	Port = strchr(Host, ':');
+
+	if (Port)
+		*Port = 0;
+
+	return strcmp(Host, "127.0.0.1") == 0 || _stricmp(Host, "localhost") == 0;
+}
+
 static void HandleRequest(int Sock, char * Request, int ReqLen)
 {
 	char Method[16], Target[2048], Version[16];
@@ -608,6 +774,7 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 	char Key[64];
 	int Admin;
 	struct UserInfo * User;
+	struct UserInfo * SysopUser = NULL;
 	char * Reply;
 	int RLen = 0;
 
@@ -620,6 +787,16 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 	if (strcmp(Target, "/health") == 0)
 	{
 		SendReply(Sock, 200, "text/plain", "ok\n", 3, NULL);
+		return;
+	}
+
+	// pdn's gateway always sends Host: 127.0.0.1:<port>. Anything else is a
+	// browser that has been pointed at us by another name (DNS rebinding), and
+	// could have set the X-Pdn headers itself.
+
+	if (!LoopbackHost(Request))
+	{
+		SendPage(Sock, 403, "LinBPQ Mail", "<p>This page is only available through the pdn control panel.</p>");
 		return;
 	}
 
@@ -650,7 +827,22 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 
 	User = MapUser(PdnUser, Admin, Why, sizeof(Why));
 
-	if (User == NULL)
+	// A node admin always gets the management pages, even with no BBS account
+	// of their own (the usual first-run case); the pages act as the BBS sysop.
+	// Webmail needs a BBS account.
+
+	if (Admin)
+	{
+		SysopUser = LookupCall(SYSOPCall[0] ? SYSOPCall : BBSName);
+
+		if (SysopUser == NULL && User == NULL)
+		{
+			SendPage(Sock, 403, "LinBPQ Mail", "<p>%s</p><p>The BBS sysop account (%s) does not exist either.</p>",
+				Why, SYSOPCall[0] ? SYSOPCall : BBSName);
+			return;
+		}
+	}
+	else if (User == NULL)
 	{
 		SendPage(Sock, 403, "LinBPQ Mail", "<p>%s</p>", Why);
 		return;
@@ -678,10 +870,25 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 
 	if (strcmp(Target, "/") == 0 || strncmp(Target, "/?", 2) == 0)
 	{
-		SendPage(Sock, 200, "LinBPQ Mail", "<p>%s mailbox. Signed in as %s (BBS user %s).</p>"
-			"<p><a href=\"%s/WebMail\">WebMail</a>%s%s%s</p>",
-			BBSName, PdnUser, User->Call, Prefix,
-			Admin ? "<a href=\"" : "", Admin ? Prefix : "", Admin ? "/Mail/Header\">Mail management</a>" : "");
+		char Admins[300];
+
+		snprintf(Admins, sizeof(Admins), "<a href=\"%s/Mail/Header\">Mail management</a>", Prefix);
+
+		if (User)
+			SendPage(Sock, 200, "LinBPQ Mail", "<p>%s mailbox. Signed in as %s (BBS user %s).</p>"
+				"<p><a href=\"%s/WebMail\">WebMail</a>%s</p>",
+				BBSName, PdnUser, User->Call, Prefix, Admin ? Admins : "");
+		else
+			SendPage(Sock, 200, "LinBPQ Mail", "<p>%s mailbox. Signed in as %s, a node admin.</p>"
+				"<p>%s Webmail needs one; the management pages don't.</p><p>%s</p>",
+				BBSName, PdnUser, Why, Admins);
+		return;
+	}
+
+	if (User == NULL && _memicmp(Target, "/Mail/", 6) != 0)
+	{
+		SendPage(Sock, 403, "LinBPQ Mail", "<p>%s Webmail needs one.</p>"
+			"<p>As a node admin you can still use <a href=\"%s/Mail/Header\">Mail management</a>.</p>", Why, Prefix);
 		return;
 	}
 
@@ -724,6 +931,13 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 		else
 			strcpy(URL, Target);
 
+		if (!WebMailRequestSafe(URL, Method, WM, Why, sizeof(Why)))
+		{
+			free(Reply);
+			SendPage(Sock, 400, "LinBPQ Mail", "<p>%s</p><p><a href=\"%s/WebMail\">WebMail</a></p>", Why, Prefix);
+			return;
+		}
+
 		ProcessMailHTTPMessage(&Dummy, Method, URL, Request, Reply, &RLen, ReqLen, "");
 	}
 	else if (_memicmp(Target, "/Mail/", 6) == 0)
@@ -747,7 +961,7 @@ static void HandleRequest(int Sock, char * Request, int ReqLen)
 		}
 
 		QueryKey(Target, Key, sizeof(Key));
-		Session = MailSessionFor(Key, PdnUser, User);
+		Session = MailSessionFor(Key, PdnUser, User ? User : SysopUser);
 
 		if (strcmp(Session->Key, Key) != 0)
 		{
@@ -914,7 +1128,13 @@ void PdnWebPoll()
 				continue;
 			}
 
-			if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+			if (n == 0)
+			{
+				C->PeerClosed = 1;	// Half-closed: it may still want its reply
+				break;
+			}
+
+			if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
 			{
 				CloseConn(C);
 				break;
@@ -933,7 +1153,7 @@ void PdnWebPoll()
 			HandleRequest(C->Sock, C->Buf, C->Len);
 			CloseConn(C);
 		}
-		else if (Now - C->Started > 30)
+		else if (C->PeerClosed || Now - C->Started > 30)
 			CloseConn(C);
 	}
 }

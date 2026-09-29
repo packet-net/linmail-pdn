@@ -152,41 +152,39 @@ int RunEventProgram(char * Program, char * Param)
 //	Web page helpers that live in the node's HTTPcode.c and TelnetV6.c. The
 //	pages themselves are served by pdnweb.c.
 
+static int HexValue(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+
+	c = tolower(c);
+
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+
+	return -1;
+}
+
 void UndoTransparency(char * input)
 {
-	// Decode %xx and + in a form or URL (as HTTPcode.c)
+	// Decode %xx and + in a form or URL, as HTTPcode.c does, except that a
+	// '%' not followed by two hex digits is kept as it is. (HTTPcode.c's
+	// version reads past the end of the string on a trailing '%'.)
 
 	char * ptr1, * ptr2;
 	char c;
-	int hex;
 
 	if (input == NULL)
 		return;
 
 	ptr1 = ptr2 = input;
 
-	while (1)
+	while ((c = *(ptr1++)))
 	{
-		c = *(ptr1++);
-
-		if (c == 0)
-			break;
-
-		if (c == '%')
+		if (c == '%' && HexValue(ptr1[0]) >= 0 && HexValue(ptr1[1]) >= 0)
 		{
-			c = *(ptr1++);
-			if(isdigit(c))
-				hex = (c - '0') << 4;
-			else
-				hex = (tolower(c) - 'a' + 10) << 4;
-
-			c = *(ptr1++);
-			if(isdigit(c))
-				hex += (c - '0');
-			else
-				hex += (tolower(c) - 'a' + 10);
-
-			*(ptr2++) = hex;
+			*(ptr2++) = (HexValue(ptr1[0]) << 4) | HexValue(ptr1[1]);
+			ptr1 += 2;
 		}
 		else if (c == '+')
 			*(ptr2++) = 32;

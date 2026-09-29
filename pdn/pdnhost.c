@@ -83,6 +83,7 @@ struct PdnStream
 	int HoldLen;
 	char CmdBuf[512];			// Node command line being assembled
 	int CmdLen;
+	int RemoteClosed;			// pdn closed the handle; end once the data is read
 };
 
 static struct PdnStream Streams[PDN_MAXSTREAMS];
@@ -550,6 +551,7 @@ static void EndSession(int n)
 	STREAM->Incoming = 0;
 	STREAM->TxOutstanding = 0;
 	STREAM->CmdLen = 0;
+	STREAM->RemoteClosed = 0;
 	STREAM->Remote[0] = 0;
 	STREAM->PortLabel[0] = 0;
 
@@ -566,7 +568,7 @@ static int FindStreamByHandle(int Handle)
 
 	for (n = 0; n < PDN_MAXSTREAMS; n++)
 	{
-		if (Streams[n].Mode == PDN_LINKED && Streams[n].Handle == Handle)
+		if (Handle && Streams[n].Mode == PDN_LINKED && Streams[n].Handle == Handle)
 			return n;
 	}
 	return -1;
@@ -1300,7 +1302,28 @@ static void ProcessClosePush(json_t * Msg)
 		return;
 
 	PdnLog("Stream %d: %s disconnected", n + 1, Streams[n].Remote);
-	EndSession(n);
+
+	// Data that arrived just before the close (a message ending /EX, then an
+	// immediate hangup) must reach the mail code before it hears about the
+	// disconnect. The handle is gone on pdn's side; hold the session open
+	// here until the mail code has read the lot (see FinishRemoteClose).
+
+	Streams[n].Handle = 0;
+	Streams[n].RemoteClosed = 1;
+
+	if (Streams[n].RxHead == NULL)
+		EndSession(n);
+}
+
+static void FinishRemoteClose()
+{
+	int n;
+
+	for (n = 0; n < PDN_MAXSTREAMS; n++)
+	{
+		if (Streams[n].RemoteClosed && Streams[n].Mode == PDN_LINKED && Streams[n].RxHead == NULL)
+			EndSession(n);
+	}
 }
 
 static void ProcessSendReply(json_t * Msg)
@@ -1609,6 +1632,7 @@ void PdnHostPoll(int WaitMs)
 
 	CheckIdle(Now);
 	AttachPending();
+	FinishRemoteClose();
 
 	// Close handles whose linger has expired
 
@@ -1769,7 +1793,7 @@ DllExport int APIENTRY SessionControl(int stream, int command, int Mask)
 			return 0;
 		}
 
-		if (STREAM->Mode == PDN_LINKED)
+		if (STREAM->Mode == PDN_LINKED && STREAM->Handle)
 		{
 			// Give pdn time to get the last of our data on air before the
 			// close. pdn discards unsent data when a link is closed.
@@ -1927,6 +1951,9 @@ DllExport int APIENTRY SendMsg(int stream, char * msg, int len)
 		break;
 
 	case PDN_LINKED:
+
+		if (STREAM->RemoteClosed)
+			break;					// Far end has gone; nothing to send it to
 
 		Msg = NewRequest("send", &Id);
 		json_object_set_new(Msg, "handle", json_integer(STREAM->Handle));
