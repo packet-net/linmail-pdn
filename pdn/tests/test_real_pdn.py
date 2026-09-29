@@ -29,6 +29,10 @@ import pytest
 
 from conftest import BIN, linmail_cfg, partner
 
+# Every test here runs in short_tmp (conftest.py), not pytest's tmp_path: the
+# mail code's log file names must fit in 100 bytes, and on a CI runner
+# tmp_path is long enough to overflow that.
+
 PDN_BIN = os.environ.get("PDN_BIN")
 LINBPQ_BIN = os.environ.get("LINBPQ_BIN")
 
@@ -207,11 +211,11 @@ ENDPORT
 """
 
 
-def test_real_pdn(tmp_path):
+def test_real_pdn(short_tmp):
     ports = {k: free_port() for k in ("pdn_telnet", "pdn_http", "rhp", "bpq_telnet", "bpq_http")}
     ports.update(bpq_udp=free_port(socket.SOCK_DGRAM), pdn_udp=free_port(socket.SOCK_DGRAM))
 
-    pdn_dir, bpq_dir, lm_dir = tmp_path / "pdn", tmp_path / "linbpq", tmp_path / "linmail-pdn"
+    pdn_dir, bpq_dir, lm_dir = short_tmp / "pdn", short_tmp / "linbpq", short_tmp / "linmail-pdn"
     for d in (pdn_dir, bpq_dir, lm_dir):
         d.mkdir()
 
@@ -246,18 +250,18 @@ def test_real_pdn(tmp_path):
         wait_file(lm_dir / "stdout.log", r'"type":"sendtoReply"[^}]*"errCode":0', 30)
 
         # 1. A user session over AX.25 through pdn
-        session(ports["bpq_telnet"], tmp_path / "user.txt", "C 2 N0LMB", "N0ABC", "Real pdn user test")
+        session(ports["bpq_telnet"], short_tmp / "user.txt", "C 2 N0LMB", "N0ABC", "Real pdn user test")
         wait_file(lm_dir / "logs" / "log_*_BBS.txt", r"Incoming Connect from N0USR")
 
         # 2. linmail-pdn forwards to LinBPQ
-        session(ports["bpq_telnet"], tmp_path / "post-out.txt", "C 2 N0LMB", "N0ABC @ N0BPQ",
+        session(ports["bpq_telnet"], short_tmp / "post-out.txt", "C 2 N0LMB", "N0ABC @ N0BPQ",
                 "Real pdn forward out", read_back=False)
         crc = wait_file(lm_dir / "logs" / "log_*_BBS.txt",
                         r"Compressed Message Comp Len \d+ Msg Len \d+ CRC (\w+)", 90).group(1)
         wait_file(bpq_dir / "logs" / "log_*_BBS.txt", rf"Uncompressing Message .* CRC {crc}", 90)
 
         # 3. LinBPQ forwards to linmail-pdn
-        session(ports["bpq_telnet"], tmp_path / "post-in.txt", "BBS", "N0XYZ @ N0LMB",
+        session(ports["bpq_telnet"], short_tmp / "post-in.txt", "BBS", "N0XYZ @ N0LMB",
                 "Real pdn forward in", read_back=False)
         crc = wait_file(bpq_dir / "logs" / "log_*_BBS.txt",
                         r"Compressed Message Comp Len \d+ Msg Len \d+ CRC (\w+)", 90).group(1)
@@ -271,18 +275,18 @@ def test_real_pdn(tmp_path):
                 p.wait(15)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for log in [tmp_path / "user.txt", lm_dir / "stdout.log"] + \
+        for log in [short_tmp / "user.txt", lm_dir / "stdout.log"] + \
                 sorted(lm_dir.glob("logs/log_*_BBS.txt")) + sorted(bpq_dir.glob("logs/log_*_BBS.txt")):
             if log.exists():
-                print(f"===== {log.relative_to(tmp_path)}")
+                print(f"===== {log.relative_to(short_tmp)}")
                 print(log.read_bytes().decode("latin-1")[-6000:])
 
 
-def test_real_pdn_rhp_auth(tmp_path):
+def test_real_pdn_rhp_auth(short_tmp):
     """With rhp.requireAuth on, linmail-pdn logs in with a pdn user."""
     ports = {k: free_port() for k in ("pdn_telnet", "pdn_http", "rhp")}
     ports.update(bpq_udp=free_port(socket.SOCK_DGRAM), pdn_udp=free_port(socket.SOCK_DGRAM))
-    pdn_dir = tmp_path / "pdn"
+    pdn_dir = short_tmp / "pdn"
     pdn_dir.mkdir()
     (pdn_dir / "packetnet.yaml").write_text(PDN_YAML.format(require_auth="true", **ports))
 
@@ -306,7 +310,7 @@ def test_real_pdn_rhp_auth(tmp_path):
 
         for name, password, expect in [("good", "linmail-pdn-test-pass", r"Listening for connects to N0LMB"),
                                        ("bad", "wrong-password-here", r"RHP auth failed: 14")]:
-            lm_dir = tmp_path / name
+            lm_dir = short_tmp / name
             lm_dir.mkdir()
             (lm_dir / "linmail.cfg").write_text(linmail_cfg())
             (lm_dir / "linmail-pdn.conf").write_text(
@@ -420,7 +424,7 @@ SLOW_PDN_YAML = PDN_YAML.replace("    link:\n", "    ax25:\n      windowSize: 1\
 SLOW_DELAY = 0.4
 
 
-def test_real_pdn_close_delivers_tail(tmp_path):
+def test_real_pdn_close_delivers_tail(short_tmp):
     """The end of a long message and the close straight after it still reach
     the lab LinBPQ over a slow link. linmail-pdn closes the moment the mail
     code disconnects, and relies on pdn to finish sending first.
@@ -432,7 +436,7 @@ def test_real_pdn_close_delivers_tail(tmp_path):
     bpq_udp, pdn_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
     link = SlowLink(pdn_udp, bpq_udp)
 
-    pdn_dir, bpq_dir, lm_dir = tmp_path / "pdn", tmp_path / "linbpq", tmp_path / "linmail-pdn"
+    pdn_dir, bpq_dir, lm_dir = short_tmp / "pdn", short_tmp / "linbpq", short_tmp / "linmail-pdn"
     for d in (pdn_dir, bpq_dir, lm_dir):
         d.mkdir()
 
@@ -475,7 +479,7 @@ def test_real_pdn_close_delivers_tail(tmp_path):
         wait_file(lm_dir / "stdout.log", r"Listening for connects to N0LMB")
 
         # 1. Post the long message while the link is still fast
-        u = TelnetUser(ports["bpq_telnet"], tmp_path / "user.txt")
+        u = TelnetUser(ports["bpq_telnet"], short_tmp / "user.txt")
         u.expect("user:")
         u.send("test")
         u.expect("password:")
@@ -549,9 +553,9 @@ def test_real_pdn_close_delivers_tail(tmp_path):
                 p.wait(15)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for log in [tmp_path / "user.txt", lm_dir / "stdout.log"]:
+        for log in [short_tmp / "user.txt", lm_dir / "stdout.log"]:
             if log.exists():
-                print(f"===== {log.relative_to(tmp_path)}")
+                print(f"===== {log.relative_to(short_tmp)}")
                 print(log.read_bytes().decode("latin-1")[-4000:])
 
 
@@ -595,16 +599,13 @@ apps:
 """
 
 
-def test_real_pdn_app_package_and_gateway(tmp_path):
+def test_real_pdn_app_package_and_gateway(short_tmp):
     """pdn discovers the app package, starts linmail-pdn itself, and serves its
     web pages through the app gateway with the viewer's identity."""
     ports = {k: free_port() for k in ("pdn_http", "rhp", "web")}
 
     # The package: manifest (web port changed for the test), binary and templates.
-    # Kept under a short path: the mail code's log file names must fit in 100 bytes.
-    import tempfile
-    tmp_path = Path(tempfile.mkdtemp(prefix="lmpkg", dir="/tmp"))
-    pkg = tmp_path / "apps" / "linmail"
+    pkg = short_tmp / "apps" / "linmail"
     pkg.mkdir(parents=True)
     repo = BIN.parent.parent
     manifest = (BIN.parent / "packaging" / "pdn-app.yaml").read_text()
@@ -621,9 +622,9 @@ def test_real_pdn_app_package_and_gateway(tmp_path):
     subprocess.run([str(BIN), "-d", str(state), "--adduser", "N0USR", "x", "FALSE"], check=True,
                    stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
-    pdn_dir = tmp_path / "pdn"
+    pdn_dir = short_tmp / "pdn"
     pdn_dir.mkdir()
-    (pdn_dir / "packetnet.yaml").write_text(PACKAGE_PDN_YAML.format(apps=tmp_path / "apps", **ports))
+    (pdn_dir / "packetnet.yaml").write_text(PACKAGE_PDN_YAML.format(apps=short_tmp / "apps", **ports))
     pdn_cmd = ["dotnet", PDN_BIN] if PDN_BIN.endswith(".dll") else [PDN_BIN]
     pdn = subprocess.Popen(
         pdn_cmd + ["--config", str(pdn_dir / "packetnet.yaml"), "--db", str(pdn_dir / "pdn.db")],
@@ -675,5 +676,3 @@ def test_real_pdn_app_package_and_gateway(tmp_path):
         except subprocess.TimeoutExpired:
             pdn.kill()
         print((pdn_dir / "pdn.log").read_bytes().decode("latin-1")[-8000:])
-        import shutil
-        shutil.rmtree(tmp_path, ignore_errors=True)

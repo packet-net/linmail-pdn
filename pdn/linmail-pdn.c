@@ -107,6 +107,33 @@ extern char MailDir[MAX_PATH];
 
 extern FILE * LogHandle[4];
 
+// The mail code (OpenLogfile in BBSUtilities.c) names each log file
+// "<log dir>/logs/log_YYMMDD_<name>.txt", one for each name in Logs, and
+// strcpy's that into a FilesNames entry, so a name that doesn't fit aborts
+// the program. These two declarations must match BBSUtilities.c;
+// test_log_dir_limit_matches_upstream checks that they do.
+
+extern char FilesNames[4][100];
+extern char * Logs[4];
+
+// The longest log directory path whose every log file name fits
+
+static int LogDirLimit()
+{
+	int longest = 0;
+	size_t i;
+
+	for (i = 0; i < sizeof(Logs) / sizeof(Logs[0]); i++)
+	{
+		int len = snprintf(NULL, 0, "/logs/log_YYMMDD_%s.txt", Logs[i]);
+
+		if (len > longest)
+			longest = len;
+	}
+
+	return (int)sizeof(FilesNames[0]) - 1 - longest;
+}
+
 BOOL GetConfig(char * ConfigName);
 VOID SaveConfig(char * ConfigName);
 VOID SetupNTSAliases(char * FN);
@@ -773,13 +800,14 @@ int main(int argc, char * argv[])
 	strcpy(ConfigDirectory, BPQDirectory);
 	strcpy(LogDirectory, LogDir[0] ? LogDir : (char *)BPQDirectory);
 
-	// The mail code keeps log file names in 100 byte buffers (FilesNames in
-	// BBSUtilities.c), and a longer name aborts the program. Refuse up front.
+	// A log file name that doesn't fit the mail code's buffer aborts the
+	// program (see LogDirLimit). Refuse up front instead.
 
-	if (strlen(LogDirectory) > 99 - strlen("/logs/log_YYMMDD_CHAT.txt"))
+	if ((int)strlen(LogDirectory) > LogDirLimit())
 	{
-		printf("linmail-pdn: the log directory path %s is too long for the mail code (at most %d characters)\n",
-			LogDirectory, (int)(99 - strlen("/logs/log_YYMMDD_CHAT.txt")));
+		printf("linmail-pdn: the log directory %s is %d characters long, and the mail code allows at most %d. "
+			"Use a shorter data directory, or a shorter log directory with -l.\n",
+			LogDirectory, (int)strlen(LogDirectory), LogDirLimit());
 		return 1;
 	}
 

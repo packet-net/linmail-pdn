@@ -69,7 +69,7 @@ def sudo(*args, check=True):
     return subprocess.run(["sudo", "-n", *args], check=check, capture_output=True, text=True)
 
 
-def test_deb_install_and_run(tmp_path):
+def test_deb_install_and_run(short_tmp):
     for port in (18095,):
         with socket.socket() as s:
             assert s.connect_ex(("127.0.0.1", port)) != 0, f"port {port} (the packaged web port) is in use"
@@ -89,7 +89,7 @@ def test_deb_install_and_run(tmp_path):
         # pdn runs as this user here, not as packetnet: give it the state dir
         sudo("install", "-d", "-o", str(os.getuid()), "-g", str(os.getgid()), "-m", "0750", str(STATE_DIR))
 
-        pdn_dir, bpq_dir = tmp_path / "pdn", tmp_path / "linbpq"
+        pdn_dir, bpq_dir = short_tmp / "pdn", short_tmp / "linbpq"
         pdn_dir.mkdir()
         bpq_dir.mkdir()
         (pdn_dir / "packetnet.yaml").write_text(DEB_PDN_YAML.format(**ports))
@@ -112,7 +112,7 @@ def test_deb_install_and_run(tmp_path):
         # A user connects over AX.25 from the LinBPQ node, through pdn
         wait_port(ports["bpq_telnet"], 60)
         # (The default linmail.cfg holds a new user's mail, so the user can't list it yet)
-        session(ports["bpq_telnet"], tmp_path / "user.txt", "C 2 N0LMB-1", "N0ABC", "Deb install test",
+        session(ports["bpq_telnet"], short_tmp / "user.txt", "C 2 N0LMB-1", "N0ABC", "Deb install test",
                 read_back=False)
         wait_file(STATE_DIR / "logs" / "log_*_BBS.txt", r"Incoming Connect from N0USR")
         wait_file(STATE_DIR / "logs" / "log_*_BBS.txt", r"Routing Trace To N0ABC")
@@ -165,7 +165,7 @@ def test_deb_install_and_run(tmp_path):
                 p.wait(20)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for log in [tmp_path / "user.txt", tmp_path / "pdn" / "pdn.log"]:
+        for log in [short_tmp / "user.txt", short_tmp / "pdn" / "pdn.log"]:
             if log.exists():
                 print(f"===== {log.name}")
                 print(log.read_bytes().decode("latin-1")[-6000:])
