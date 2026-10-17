@@ -15,7 +15,7 @@ Copy these from your LinBPQ directory into `/var/lib/packetnet/apps/linmail/`:
 
 - `linmail.cfg` (settings, users and forwarding partners)
 - `DIRMES.SYS` (the message list) and the `Mail/` folder (the messages themselves)
-- `WFBID.SYS` (BIDs already seen), `WP.SYS` (white pages)
+- `WFBID.SYS` (BIDs already seen) and `WP.cfg` (white pages; current LinBPQ keeps them there, so copy `WP.SYS` too only if you have one)
 - `BADWORDS.SYS` and `INTRCPT.APS`, if you have them
 - `BPQBBSUsers.dat`, if your LinBPQ is old enough to still have one
 
@@ -37,6 +37,27 @@ portmap = 1=vhf, 2=hf
 
 The same numbers pick the ports for mail-for beacons (the `UIPort` settings in `linmail.cfg`). There's a commented example with every setting in `/usr/share/packetnet/apps/linmail/linmail-pdn.conf.example`.
 
+Some connect script lines only a BPQ node understands, and pdn has no equivalent: `NC`, `ATTACH`, `PASSWORD`, `FRACK`, `MAXFRAME`, and a `!` in front of a callsign. Rewrite those as a plain `C <port> <call>`. The port numbers can stay, through the port map, and FRACK and MAXFRAME values belong in pdn's port settings instead. For example `MSGTYPES PTB8000R|PASSWORD|FRACK 3 21|MAXFRAME 3 3|NC 3 !GB7IOW-1` becomes `MSGTYPES PTB8000R|C 3 GB7IOW-1`.
+
+## Telnet and FBB logins
+
+If programs log in to your BBS over LinBPQ's telnet ports (a forwarding client such as the pdn-mailcast head end, or your own sysop scripts), or you do, LinBPQ Mail can take those logins the same way. It's off until you give it a port. Add to `linmail-pdn.conf`:
+
+```
+fbb_port = 8011            # like LinBPQ's FBBPORT, for programs: no prompts
+telnet_port = 8010         # like LinBPQ's TCPPORT: user: and password: prompts
+USER=tf,password,M0LTE,,SYSOP
+USER=Q0HEAD,password,Q0HEAD
+```
+
+- Copy the `USER=` lines from the Telnet port in `bpq32.cfg` as they are: name, password, callsign, application, `SYSOP`. Names and passwords are case-sensitive, as in LinBPQ.
+- After logging in, type `BBS`, as at LinBPQ's node prompt. Programs that send `BBS` after the password carry on working. A `USER=` line with `BBS` as its application goes straight in.
+- Sysop commands (`FWD`, `K` on others' mail and so on) work for a login with `SYSOP` on its line whose BBS user also has the sysop flag, exactly as in LinBPQ.
+- Programs need only the new host and port. Nothing else about the exchange changes.
+- It listens on this machine only (`127.0.0.1`) unless you set `telnet_bind`, say to `0.0.0.0` for every address. Passwords cross the network in plain text, so only open it to a network you trust.
+- **Port 8011:** pdn's own telnet console listens on `127.0.0.1:8011`, so linmail-pdn can't have 8011 on that address too. Either move pdn's console (`management.telnet.port` in the node config), or pick another `fbb_port` and change the clients' port, or bind linmail-pdn to the machine's LAN address (`telnet_bind = 192.168.1.10`), where 8011 is free and remote clients change only the host.
+- LinBPQ's telnet log records every password typed; linmail-pdn never logs, echoes or keeps them. If you're moving from LinBPQ, it's worth changing the passwords as you go.
+
 ## Start it
 
 Enable **LinBPQ Mail** in the control panel. pdn starts it, and it answers on the callsign you set. Stations can connect to that call directly, or type `MAIL` at the node prompt. Webmail and the mail management pages open from the app's entry in the panel.
@@ -50,7 +71,7 @@ Node admins always get the management pages, acting as the BBS sysop, even with 
 - **Connect scripts:** plain `C port CALL` lines work, including multi-hop scripts where later lines are typed at the far node. pdn can't do digipeated connects (`C CALL V DIGI`), NET/ROM alias connects, or BPQ-only node commands (`NC`, `ATTACH`, `RADIO`, `MCAST`). Those lines fail, so an `ELSE` block in the script still runs.
 - **Not included:** the SMTP, POP3 and NNTP servers. They stay off even if `linmail.cfg` turns them on, and linmail-pdn logs a line saying so. MQTT, the packet map, Winlink session reporting and multicast mail aren't included either.
 - **UI beacons** go out without a digipeater path, and the BBS doesn't answer header resync requests heard on air.
-- **Logins:** BPQ's own web login isn't used. The pages only open through the pdn control panel.
+- **Logins:** BPQ's own web login isn't used. The pages only open through the pdn control panel. Telnet and FBB logins work as described above, but there is no node behind them: only `BBS` (or `MAIL`) and `B` work at the prompt.
 
 ## Going back
 

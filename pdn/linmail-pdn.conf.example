@@ -48,3 +48,29 @@ portmap = 1=vhf, 2=hf
 # templates themselves are built in. Default: HTML/ beside the linmail-pdn
 # binary
 #html_dir = /usr/share/packetnet/apps/linmail/HTML
+
+# Telnet and FBB logins, as LinBPQ's Telnet port takes them. Off unless a
+# port is set; there is no default port. pdn's own telnet console listens on
+# 127.0.0.1:8011, so don't give either port 8011 on that address.
+#
+# telnet_port is LinBPQ's TCPPORT: telnet negotiation, user: and password:
+# prompts, echo if the client asks for it. fbb_port is LinBPQ's FBBPORT, for
+# programs: no prompts, and binary safe once in the BBS. After logging in,
+# BBS enters the mailbox, as at LinBPQ's node prompt.
+#telnet_port = 8010
+#fbb_port = 8012
+
+# Address to listen on. Default 127.0.0.1, this machine only. Passwords
+# cross the network in plain text.
+#telnet_bind = 0.0.0.0
+
+# Most logins at once, across both ports (LinBPQ's MAXSESSIONS)
+#telnet_max = 10
+
+# Logins, one per line, pasted from bpq32.cfg's Telnet port as they are:
+# name,password,callsign,application,SYSOP. Name and password are
+# case-sensitive. SYSOP makes it a secure session, so a BBS user flagged
+# sysop gets sysop commands. Application BBS skips typing BBS. In these lines
+# a # is part of the password, and ; starts a comment, as in bpq32.cfg.
+#USER=tf,secret,M0LTE,,SYSOP
+#USER=Q0HEAD,secret,Q0HEAD
