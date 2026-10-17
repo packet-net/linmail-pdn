@@ -44,6 +44,7 @@ int PdnIsCallsign(char * Call);
 int PdnLocalConnect(char * Call, int Secure, int Id, char * Peer);	// Stream (0 based), or -1 if none is free
 void PdnLocalData(int n, UCHAR * Data, int Len);	// From the caller to the BBS
 void PdnLocalClosed(int n);							// The caller has gone
+int PdnLocalBacklog(int n);							// Bytes the BBS has not yet read, roughly
 
 //	pdntelnet.c: LinBPQ style telnet and FBB logins
 

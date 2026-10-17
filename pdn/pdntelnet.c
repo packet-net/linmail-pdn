@@ -45,6 +45,15 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 //
 //	Passwords are never echoed, logged or stored anywhere but in memory.
 //	Everything runs on the main thread, inside PdnHostPoll, under its lock.
+//
+//	It is built not to let one client hurt the rest: each session is read a
+//	little at a time, and not at all while the BBS has not yet taken what it
+//	sent (so TCP pushes back on a client that sends faster than the BBS
+//	reads); a session not yet logged in may send only a little, has 30
+//	seconds to log in, and may not hold more than a few slots from one
+//	address, and the oldest of them gives way when the slots run out; a
+//	failed login is answered only after a delay that grows with the failures
+//	from that address; and the prompts don't say whether a name exists.
 
 #include "bpqmail.h"
 #include "pdnhost.h"
@@ -59,7 +68,15 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 #define TN_LINE 256					// Longest line before it is passed on in pieces
 #define TN_MAXOUT (1024 * 1024)		// Output waiting for a client that is not reading
 #define TN_MAXFAILS 5				// Failed logins before the session is dropped, as LinBPQ
-#define TN_LOGINTIME 120			// Seconds to log in
+#define TN_LOGINTIME 30				// Seconds to log in
+#define TN_READ 4096				// One read
+#define TN_READS 4					// Reads per session each time round, at most
+#define TN_BACKLOG (64 * 1024)		// Unread by the BBS before a session is read no more
+#define TN_PRELOGIN 8192			// Most a client may send before it has logged in
+#define TN_PERADDR 3				// Sessions not yet logged in from one address
+#define TN_FIELD 256				// Longest USER line field, as LinBPQ, with its 0
+#define TN_FAILADDRS 32				// Addresses whose failed logins are remembered
+#define TN_NOISE 20					// Connect and login failure lines a minute, at most
 #define TN_PROMPTIDLE 900			// Seconds at the prompt, as LinBPQ's IDLETIME
 #define TN_STREAMWAIT 5				// Seconds to wait for a free BBS stream
 #define TN_CLOSEWAIT 30				// Seconds to send what is left after the BBS hangs up
@@ -88,8 +105,8 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 
 struct TelnetUser
 {
-	char Name[64];
-	char Pass[64];
+	char Name[TN_FIELD];
+	char Pass[TN_FIELD];
 	char Call[10];
 	int Sysop;
 	int StraightIn;					// appl field BBS: no need to type BBS
@@ -100,8 +117,12 @@ struct TelnetSess
 	int Sock;
 	int FBB;						// Logged in on the FBB port
 	int State;
-	int User;						// Index into Users once the name is known, else -1
+	int User;						// Index into Users once logged in, else -1
 	int Fails;
+	uint64_t NotBefore;				// After a failed login: nothing is read or answered until then (ms)
+	int Pending;					// What to do then: 1 ask for the user again, 2 hang up
+	int PreLogin;					// Bytes received before logging in
+	char Name[TN_LINE + 1];			// The name typed, until the password comes
 	int Echo;						// The client asked us to echo
 	int EchoOffered;				// We said WILL ECHO and have not taken it back
 	int SGAOffered;
@@ -119,7 +140,24 @@ struct TelnetSess
 	int OutSize;
 	UCHAR * Hold;					// Data for the BBS while waiting for a stream
 	int HoldLen;
+	UCHAR * Defer;					// Input that came after a failed login, for after the delay
+	int DeferLen;
 };
+
+// Failed logins by address, for the delay after each
+
+struct FailAddr
+{
+	char Addr[64];
+	int Count;
+	time_t Last;
+};
+
+static struct FailAddr FailAddrs[TN_FAILADDRS];
+
+static time_t NoiseMinute = 0;
+static int NoiseCount = 0;
+static int NoiseDropped = 0;
 
 static struct TelnetUser * Users = NULL;
 static int UserCount = 0;
@@ -149,6 +187,46 @@ static void TelnetLog(const char * format, ...)
 	Debugprintf("linmail-pdn: telnet: %s", Mess);
 }
 
+static void TelnetNoise(const char * format, ...)
+{
+	// Connects, refusals and failed logins: anyone can cause these, so at
+	// most TN_NOISE lines a minute, and a count of the rest
+
+	char Mess[512];
+	time_t Now = time(NULL);
+	va_list(arglist);
+
+	if (Now - NoiseMinute >= 60)
+	{
+		if (NoiseDropped)
+			TelnetLog("%d more connect and login lines not shown in the last minute", NoiseDropped);
+
+		NoiseMinute = Now;
+		NoiseCount = NoiseDropped = 0;
+	}
+
+	if (NoiseCount >= TN_NOISE)
+	{
+		NoiseDropped++;
+		return;
+	}
+
+	NoiseCount++;
+
+	va_start(arglist, format);
+	vsnprintf(Mess, sizeof(Mess), format, arglist);
+	va_end(arglist);
+
+	TelnetLog("%s", Mess);
+}
+
+static uint64_t NowMs()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 //	Settings
 
 static void AddUser(char * Value)
@@ -156,7 +234,7 @@ static void AddUser(char * Value)
 	// LinBPQ's USER=user,password,call,appl,SYSOP. As there, each field ends
 	// at its first space, and spaces before a field are skipped.
 
-	char Field[5][64];
+	char Field[5][TN_FIELD + 1];
 	char * ptr = Value, * Comma;
 	struct TelnetUser * USER;
 	int n = 0;
@@ -173,9 +251,17 @@ static void AddUser(char * Value)
 		if (Comma)
 			*(Comma++) = 0;
 
-		strncpy(Field[n], ptr, 63);
+		strncpy(Field[n], ptr, TN_FIELD);
 		strlop(Field[n], ' ');
 		strlop(Field[n], '\t');
+
+		if (strlen(Field[n]) >= TN_FIELD)
+		{
+			// Never shown: it may be the password
+
+			TelnetLog("a user line has a field longer than %d characters - user ignored", TN_FIELD - 1);
+			return;
+		}
 		n++;
 		ptr = Comma;
 	}
@@ -196,7 +282,7 @@ static void AddUser(char * Value)
 
 	if (!PdnIsCallsign(Field[2]))
 	{
-		TelnetLog("user %s: %s is not a callsign the BBS can use - ignored", Field[0], Field[2]);
+		TelnetLog("user %s: the callsign field is not a callsign the BBS can use - user ignored", Field[0]);
 		return;
 	}
 
@@ -212,8 +298,8 @@ static void AddUser(char * Value)
 	if (_stricmp(Field[3], "BBS") == 0 || _stricmp(Field[3], "MAIL") == 0)
 		USER->StraightIn = 1;
 	else if (Field[3][0] && strcmp(Field[3], "\"\"") != 0)
-		TelnetLog("user %s: application %s ignored - the session starts at the prompt, where BBS enters the mailbox",
-			Field[0], Field[3]);
+		TelnetLog("user %s: the application field is not BBS, so it is ignored - the session starts at the prompt, where BBS enters the mailbox",
+			Field[0]);
 }
 
 int PdnTelnetOption(const char * Key, const char * Value)
@@ -379,6 +465,7 @@ static void CloseSess(struct TelnetSess * S)
 	close(S->Sock);
 	free(S->Out);
 	free(S->Hold);
+	free(S->Defer);
 	memset(S, 0, sizeof(struct TelnetSess));
 	S->Sock = -1;
 	S->Stream = -1;
@@ -459,17 +546,59 @@ static void EnterBBS(struct TelnetSess * S)
 	TryBBS(S);
 }
 
+static int FailDelay(char * Addr)
+{
+	// How long to wait before answering a failed login, in ms: a second for
+	// each of the first five failures from an address, then doubling, up to
+	// half a minute. An address is forgiven after ten quiet minutes.
+
+	struct FailAddr * F = NULL, * Oldest = &FailAddrs[0];
+	time_t Now = time(NULL);
+	int i, Delay;
+
+	for (i = 0; i < TN_FAILADDRS; i++)
+	{
+		if (strcmp(FailAddrs[i].Addr, Addr) == 0)
+			F = &FailAddrs[i];
+
+		if (FailAddrs[i].Last < Oldest->Last)
+			Oldest = &FailAddrs[i];
+	}
+
+	if (F == NULL)
+	{
+		F = Oldest;
+		memset(F, 0, sizeof(struct FailAddr));
+		strcpy(F->Addr, Addr);
+	}
+
+	if (Now - F->Last > 600)
+		F->Count = 0;
+
+	F->Count++;
+	F->Last = Now;
+
+	if (F->Count <= 5)
+		return 1000;
+
+	Delay = F->Count - 5 > 5 ? 30000 : 1000 << (F->Count - 5);
+	return Delay > 30000 ? 30000 : Delay;
+}
+
 static void LoginFailed(struct TelnetSess * S, char * Why)
 {
+	// Answered after a delay, and always by asking for the user again, so the
+	// answer says nothing about which part was wrong
+
 	S->Fails++;
+	S->User = -1;
+	S->State = TN_USER;
+	memset(S->Name, 0, sizeof(S->Name));
 
-	TelnetLog("login failed from %s: %s", S->Peer, Why);
+	TelnetNoise("login failed from %s: %s", S->Peer, Why);
 
-	if (S->Fails >= TN_MAXFAILS)
-	{
-		Say(S, AttemptsMsg);
-		StartClosing(S);
-	}
+	S->NotBefore = NowMs() + FailDelay(S->Peer);
+	S->Pending = S->Fails >= TN_MAXFAILS ? 2 : 1;
 }
 
 static void PromptLine(struct TelnetSess * S, char * Line)
@@ -501,7 +630,7 @@ static void PromptLine(struct TelnetSess * S, char * Line)
 
 static void LoginLine(struct TelnetSess * S, char * Line)
 {
-	int i;
+	int i, Found = -1;
 
 	if (S->State == TN_USER)
 	{
@@ -512,28 +641,10 @@ static void LoginLine(struct TelnetSess * S, char * Line)
 			return;
 		}
 
-		S->User = -1;
+		// Any name gets the password prompt; name and password are checked
+		// together, so the prompts don't say whether a name exists
 
-		for (i = 0; i < UserCount; i++)
-		{
-			if (strcmp(Line, Users[i].Name) == 0)
-			{
-				S->User = i;
-				break;
-			}
-		}
-
-		if (S->User < 0)
-		{
-			// Not the name: people type passwords here by mistake
-
-			LoginFailed(S, "unknown user");
-
-			if (S->State != TN_CLOSING)
-				Say(S, "user:");
-			return;
-		}
-
+		strcpy(S->Name, Line);
 		S->State = TN_PASS;
 
 		if (!S->FBB)
@@ -547,21 +658,37 @@ static void LoginLine(struct TelnetSess * S, char * Line)
 	if (!S->FBB)
 		Say(S, "\r\n");
 
-	if (strcmp(Line, Users[S->User].Pass) != 0)
+	for (i = 0; i < UserCount; i++)
 	{
-		char Why[100];
+		if (strcmp(S->Name, Users[i].Name) == 0)
+		{
+			Found = i;
+			break;
+		}
+	}
 
-		snprintf(Why, sizeof(Why), "wrong password for %s", Users[S->User].Name);
-		LoginFailed(S, Why);
+	if (Found < 0)
+	{
+		// The name typed is not shown: people type passwords there by mistake
 
-		if (S->State != TN_CLOSING)
-			Say(S, "password:");
+		LoginFailed(S, "unknown user");
 		return;
 	}
 
+	if (strcmp(Line, Users[Found].Pass) != 0)
+	{
+		char Why[300];
+
+		snprintf(Why, sizeof(Why), "wrong password for %s", Users[Found].Name);
+		LoginFailed(S, Why);
+		return;
+	}
+
+	S->User = Found;
 	S->Fails = 0;
 	S->State = TN_PROMPT;
 	S->Since = time(NULL);
+	memset(S->Name, 0, sizeof(S->Name));
 
 	TelnetLog("%s logged in from %s as %s%s", Users[S->User].Name, S->Peer, Users[S->User].Call,
 		Users[S->User].Sysop ? " (sysop)" : "");
@@ -665,6 +792,16 @@ static void Input(struct TelnetSess * S, UCHAR * Data, int Len)
 
 		if (S->State == TN_CLOSING || S->State == TN_FREE)
 			return;
+
+		if (S->NotBefore)
+		{
+			// A login just failed: the rest waits for the delay
+
+			S->Defer = realloc(S->Defer, S->DeferLen + Len - i);
+			memcpy(&S->Defer[S->DeferLen], &Data[i], Len - i);
+			S->DeferLen += Len - i;
+			return;
+		}
 
 		if (S->FBB && (S->State == TN_BBS || S->State == TN_WAITSTREAM))
 		{
@@ -845,16 +982,21 @@ void PdnTelnetInit()
 		TelnetLog("no user lines in linmail-pdn.conf, so nobody can log in");
 }
 
+static int LoggingIn(struct TelnetSess * S)
+{
+	return S->Sock >= 0 && (S->State == TN_USER || S->State == TN_PASS);
+}
+
 static void Accept(int Listener, int FBB)
 {
 	while (1)
 	{
 		struct sockaddr_storage Peer;
 		socklen_t PLen = sizeof(Peer);
-		struct TelnetSess * S = NULL;
+		struct TelnetSess * S = NULL, * Oldest = NULL, * OldestHere = NULL;
 		char Host[64] = "?";
 		int Sock = accept(Listener, (struct sockaddr *)&Peer, &PLen);
-		int i, Count = 0, One = 1;
+		int i, Count = 0, FromHost = 0, One = 1;
 
 		if (Sock < 0)
 			return;
@@ -863,18 +1005,68 @@ static void Accept(int Listener, int FBB)
 
 		for (i = 0; i < TN_MAXSESS; i++)
 		{
-			if (Sess[i].Sock >= 0)
-				Count++;
-			else if (S == NULL)
-				S = &Sess[i];
+			struct TelnetSess * T = &Sess[i];
+
+			if (T->Sock < 0)
+			{
+				if (S == NULL)
+					S = T;
+				continue;
+			}
+
+			Count++;
+
+			if (LoggingIn(T))
+			{
+				if (strcmp(T->Peer, Host) == 0)
+				{
+					FromHost++;
+
+					if (OldestHere == NULL || T->Since < OldestHere->Since)
+						OldestHere = T;
+				}
+
+				if (Oldest == NULL || T->Since < Oldest->Since)
+					Oldest = T;
+			}
+		}
+
+		if (FromHost >= TN_PERADDR)
+		{
+			// Only a few logins in progress from one address: the oldest of
+			// them makes way, so one address can't take every slot, and
+			// can't lock out a client of its own that logs in promptly
+
+			TelnetNoise("%d logins in progress from %s - dropped the oldest", FromHost, Host);
+
+			if (Oldest == OldestHere)
+				Oldest = NULL;
+
+			CloseSess(OldestHere);
+			Count--;
+
+			if (S == NULL)
+				S = OldestHere;
 		}
 
 		if (Count >= MaxSessions || S == NULL)
 		{
-			TelnetLog("connect from %s refused - all %d sessions in use", Host, MaxSessions);
-			send(Sock, "No Free Sessions\r\n", 18, MSG_NOSIGNAL | MSG_DONTWAIT);
-			close(Sock);
-			continue;
+			// Full. Make room by dropping the session that has been trying
+			// to log in longest, so idle connections can't lock everyone out.
+
+			if (Oldest == NULL || Oldest->Sock < 0)
+			{
+				TelnetNoise("connect from %s refused - all %d sessions in use", Host, MaxSessions);
+				send(Sock, "No Free Sessions\r\n", 18, MSG_NOSIGNAL | MSG_DONTWAIT);
+				close(Sock);
+				continue;
+			}
+
+			TelnetNoise("all %d sessions in use - dropped the login in progress from %s", MaxSessions, Oldest->Peer);
+			CloseSess(Oldest);
+
+			if (S == NULL)
+				S = Oldest;
 		}
 
 		fcntl(Sock, F_SETFL, fcntl(Sock, F_GETFL) | O_NONBLOCK);
@@ -889,7 +1081,7 @@ static void Accept(int Listener, int FBB)
 		S->Since = S->LastInput = time(NULL);
 		strcpy(S->Peer, Host);
 
-		TelnetLog("connect from %s on the %s port", Host, FBB ? "FBB" : "telnet");
+		TelnetNoise("connect from %s on the %s port", Host, FBB ? "FBB" : "telnet");
 
 		if (!FBB)
 		{
@@ -903,8 +1095,27 @@ static void Accept(int Listener, int FBB)
 	}
 }
 
+static int Readable(struct TelnetSess * S, uint64_t Now)
+{
+	// Whether to read this session now. Not while a failed login's delay
+	// runs, nor while the BBS (or the wait for a stream) still holds a lot
+	// of what it sent: leaving it in the socket makes TCP push back.
+
+	if (S->NotBefore && Now < S->NotBefore)
+		return FALSE;
+
+	if (S->State == TN_BBS && PdnLocalBacklog(S->Stream) >= TN_BACKLOG)
+		return FALSE;
+
+	if (S->State == TN_WAITSTREAM && S->HoldLen >= TN_BACKLOG)
+		return FALSE;
+
+	return TRUE;
+}
+
 void PdnTelnetFds(fd_set * Read, fd_set * Write, int * Max)
 {
+	uint64_t Now = NowMs();
 	int i;
 
 	if (TelnetListen >= 0)
@@ -926,7 +1137,8 @@ void PdnTelnetFds(fd_set * Read, fd_set * Write, int * Max)
 		if (S->Sock < 0)
 			continue;
 
-		FD_SET(S->Sock, Read);
+		if (Readable(S, Now))
+			FD_SET(S->Sock, Read);
 
 		if (S->OutLen > 0)
 			FD_SET(S->Sock, Write);
@@ -936,11 +1148,44 @@ void PdnTelnetFds(fd_set * Read, fd_set * Write, int * Max)
 	}
 }
 
+static void AfterDelay(struct TelnetSess * S)
+{
+	// A failed login's delay is over: answer it, then deal with what came
+	// in meanwhile
+
+	UCHAR * Rest = S->Defer;
+	int RestLen = S->DeferLen;
+
+	S->NotBefore = 0;
+	S->Defer = NULL;
+	S->DeferLen = 0;
+
+	if (S->Pending == 2)
+	{
+		S->Pending = 0;
+		free(Rest);
+		Say(S, AttemptsMsg);
+		StartClosing(S);
+		return;
+	}
+
+	S->Pending = 0;
+	Say(S, "user:");
+
+	if (Rest)
+	{
+		Input(S, Rest, RestLen);
+		memset(Rest, 0, RestLen);			// It may have held a password
+		free(Rest);
+	}
+}
+
 void PdnTelnetPoll()
 {
 	time_t Now = time(NULL);
-	UCHAR Buffer[4096];
-	int i, n;
+	uint64_t NowMilli = NowMs();
+	UCHAR Buffer[TN_READ];
+	int i, n, Reads;
 
 	if (TelnetListen >= 0)
 		Accept(TelnetListen, FALSE);
@@ -955,14 +1200,31 @@ void PdnTelnetPoll()
 		if (S->Sock < 0)
 			continue;
 
-		// Input
+		if (S->NotBefore && NowMilli >= S->NotBefore)
+			AfterDelay(S);
 
-		while (S->Sock >= 0)
+		// Input: a little at a time, so no one session holds up the rest
+
+		for (Reads = 0; Reads < TN_READS && S->Sock >= 0 && S->State != TN_FREE && Readable(S, NowMilli); Reads++)
 		{
+			int Before = LoggingIn(S);
+
 			n = recv(S->Sock, Buffer, sizeof(Buffer), MSG_DONTWAIT);
 
 			if (n > 0)
 			{
+				if (Before)
+				{
+					S->PreLogin += n;
+
+					if (S->PreLogin > TN_PRELOGIN)
+					{
+						TelnetNoise("%s sent too much without logging in - closed", S->Peer);
+						CloseSess(S);
+						break;
+					}
+				}
+
 				Input(S, Buffer, n);
 				continue;
 			}
@@ -978,10 +1240,10 @@ void PdnTelnetPoll()
 			CloseSess(S);
 		}
 
+		memset(Buffer, 0, sizeof(Buffer));		// It may have held a password
+
 		if (S->Sock < 0)
 			continue;
-
-		memset(Buffer, 0, sizeof(Buffer));		// It may have held a password
 
 		FlushOut(S);
 
@@ -998,7 +1260,7 @@ void PdnTelnetPoll()
 		case TN_PASS:
 			if (Now - S->Since > TN_LOGINTIME)
 			{
-				TelnetLog("no login from %s in %d seconds - closed", S->Peer, TN_LOGINTIME);
+				TelnetNoise("no login from %s in %d seconds - closed", S->Peer, TN_LOGINTIME);
 				CloseSess(S);
 			}
 			break;

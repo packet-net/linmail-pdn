@@ -1311,6 +1311,19 @@ void PdnLocalClosed(int n)
 	pthread_mutex_unlock(&PdnLock);
 }
 
+int PdnLocalBacklog(int n)
+{
+	int Bytes = 0;
+
+	pthread_mutex_lock(&PdnLock);
+
+	if (n >= 0 && n < PDN_MAXSTREAMS && Streams[n].Mode == PDN_LOCAL)
+		Bytes = Streams[n].RxCount * 256;
+
+	pthread_mutex_unlock(&PdnLock);
+	return Bytes;
+}
+
 static struct PdnPending * FindPending(int Handle)
 {
 	int i;

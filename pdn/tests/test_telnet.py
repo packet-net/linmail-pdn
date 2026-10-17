@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+
+import pytest
 import re
 import socket
 import time
 from pathlib import Path
 
-from conftest import free_port, linmail_cfg, partner
+from conftest import BIN, free_port, linmail_cfg, partner
 
 DATA = Path(__file__).resolve().parent / "data"
 
@@ -259,28 +261,70 @@ def test_sysop_needs_both_flags(linmail, fake):
     assert "telnet login from 127.0.0.1 as N0USR\n" in linmail.stdout()
 
 
-def test_head_end_forwarding_on_fbb_port(linmail, fake):
-    """The pdn-mailcast head end as Q0HEAD on the FBB port: user, password and
-    BBS sent at once with no prompts awaited, then a B1F session as caller.
-    The BBS's first bytes are its SID: no prompts, no telnet negotiation."""
-    head = partner(call="Q0HEAD", script=(), at="Q0HEAD")
-    head.to_calls = ["MCAST"]
-    head.allow_b2 = False
-    head.allow_compressed = True
-    tport, fport = setup(linmail, partners=[head])
+@pytest.mark.parametrize("protocol", ["B1", "B2"])
+def test_head_end_collects_a_bulletin_on_fbb_port(linmail, fake, protocol):
+    """The pdn-mailcast head end's real job, as Q0HEAD on the FBB port: user,
+    password and BBS sent at once with no prompts awaited, then a B1F session
+    as caller with its own CR LF line ends, taking a bulletin. The compressed
+    message must arrive byte for byte as the BBS sends it over the air to an
+    identical partner, and it holds 0xFF, CR and LF bytes, which a telnet
+    port would have mangled. The head end speaks B1F; B2F is checked too."""
+    def b1_partner(call):
+        p = partner(call=call, script=(), at=call)
+        p.to_calls = ["MCAST"]
+        p.allow_b2 = protocol == "B2"
+        p.allow_compressed = True
+        p.send_new_immediately = False
+        p.fwd_interval = 3600
+        return p
+    tport, fport = setup(linmail, partners=[b1_partner("Q0HEAD"), b1_partner("N0BPQ")])
     start(linmail, fake)
 
-    # A bulletin for the head end to collect
+    # The bulletin, from a sysop at the telnet port
+    import random
+    rnd = random.Random(7)
+    words = ["mailcast", "GB7RDG", "bulletin", "solar", "flux", "K", "index", "QSL", "73", "net"]
+    body = ["".join(rnd.choice(words) + rnd.choice(" ,.-/") for _ in range(12)) for _ in range(60)]
     c = read_quiet_login(tport, "tf", SYSOP_PW)
     s0 = len(c.got)
     c.line("SB MCAST")
     c.until("Title", s0)
     c.line("For the mailcast")
     c.until("Message", s0)
-    c.send("Bulletin body\r/EX\r")
+    c.send("".join(line + "\r" for line in body) + "/EX\r")
     c.until("de N0LMB>", s0)
     c.line("B")
     c.closed()
+
+    def collect(send, recv_until, got):
+        """One B1F collection as caller. Returns the compressed message."""
+        send(f"[MAILCAST-1.0-{protocol}FHM$]\r\nFF\r\n")
+        fa = recv_until("F> ")
+        recv_until("\r", fa)
+        proposal = bytes(got()[:fa]).decode("latin-1")
+        pattern = r"FA B N0SYS \S+ MCAST \S+_N0LMB \d+" if protocol == "B1" else r"FC EM \S+_N0LMB \d+ \d+ \d+"
+        assert re.search(pattern, proposal), proposal
+        send("FS +\r\n")
+
+        def whole():
+            data = bytes(got()[fa:])
+            start = data.find(b"\x01")
+            if start < 0:
+                return None
+            try:
+                _, _, end = fbb_blocks(data[start:])
+            except (IndexError, AssertionError):
+                return None
+            return data[start:start + end]
+        end = time.time() + 15
+        while (block := whole()) is None:
+            assert time.time() < end, "no compressed message: %r" % bytes(got()[fa:fa + 120])
+            time.sleep(0.1)
+        send("FF\r\n")
+        recv_until("FQ", fa)
+        return block
+
+    from test_linmail_pdn import fbb_blocks
 
     h = Client(fport)
     h.send(f"Q0HEAD\r{HEAD_PW}\rBBS\r")
@@ -289,17 +333,21 @@ def test_head_end_forwarding_on_fbb_port(linmail, fake):
     assert IAC not in h.got and b"user:" not in h.got and b"password:" not in h.got
     prompt_end = h.until(">\r", sid_end)
     assert b"\n" not in h.got[:prompt_end], "the FBB port must not add LF"
-
-    h.send("[MAILCAST-1.0-B1FHM$]\rFF\r")
-    fa_end = h.until("F> ", prompt_end)
-    proposal = h.text(prompt_end)[:fa_end - prompt_end]
-    assert re.search(r"FA B N0SYS \S+ MCAST \S+_N0LMB \d+", proposal), proposal
-    h.until("\r", fa_end)
-    h.send("FS -\r")           # refused, so the BBS counts it handed over
-    h.send("FF\r")             # and nothing to send back
-    h.until("FQ", fa_end)
+    fbb = collect(h.send, lambda m, start=prompt_end: h.until(m, start), lambda: (h._read(0.1), h.got)[1])
     assert h.closed()
     linmail.wait_bbslog(r"Q0HEAD\s+Q0HEAD Disconnected")
+
+    r = fake.accept("N0BPQ-1")
+    fake.wait_text(r, "de N0LMB>")
+    base = len(fake.sent[r])
+    air = collect(lambda d: fake.recv(r, d),
+                  lambda m, start=0: fake.wait_text(r, m, start=base + start) - base,
+                  lambda: fake.sent[r][base:])
+
+    assert fbb == air, "the FBB port changed the message"
+    body_bytes, _, _ = fbb_blocks(fbb)
+    for b in (0xFF, 0x0D, 0x0A):
+        assert bytes([b]) in body_bytes, f"pick a body whose compressed form holds {b:#x}"
     no_secrets(linmail, c, h)
 
 
@@ -343,46 +391,80 @@ def test_b2_forward_in_on_fbb_port(linmail, fake):
     assert b.closed()
 
 
-def test_login_failures(linmail, fake):
-    tport, fport = setup(linmail)
+def test_failed_login_is_delayed_and_says_nothing(linmail, fake):
+    """A wrong password and an unknown name get the same answer, a second
+    later: a new line, then the user prompt again. The right login still works."""
+    tport, _ = setup(linmail)
     start(linmail, fake)
-
-    # A wrong password gets the password prompt again; the right one still works
+    answers = []
     c = Client(tport)
-    c.quiet()
+    c.until("user:")
+    for name in ("tf", "nosuchuser"):
+        c.line(name)
+        s0 = c.until("password:", len(c.got))
+        t0 = time.time()
+        c.line("wrongpass9")
+        end = c.until("user:", s0)
+        assert time.time() - t0 >= 0.9, "a failed login must be answered only after a delay"
+        answers.append(bytes(c.got[s0:end]))
+    assert answers[0] == answers[1] == b"\r\nuser:"
     c.line("tf")
-    c.quiet()
-    c.line("wrongpass9")
-    assert c.quiet() == b"\r\npassword:"
+    c.until("password:", len(c.got))
     c.line(SYSOP_PW)
-    c.quiet()
     s0 = len(c.got)
+    c.until("Type BBS", s0)
     c.line("BBS")
     c.until("de N0LMB>", s0)
     c.close()
-
-    # Names are case-sensitive, as in LinBPQ; five failures and it hangs up
-    c = Client(tport)
-    c.quiet()
-    for i in range(4):
-        c.line("TF")
-        assert c.quiet() == b"user:"
-    c.line("TF")
-    c.until("Too many attempts - Disconnected\r\n")
-    assert c.closed()
-
-    # The same on the FBB port, where nothing is prompted for
-    f = Client(fport)
-    f.send("".join(f"Q0HEAD\rwrongpass9\r" for _ in range(5)))
-    f.until("Too many attempts - Disconnected\r")
-    assert f.closed()
-    assert f.text().count("password:") == 4 and "user:" not in f.text()
-
     out = linmail.stdout()
-    assert out.count("login failed from 127.0.0.1: unknown user") == 5
     assert out.count("login failed from 127.0.0.1: wrong password for tf") == 1
-    assert out.count("login failed from 127.0.0.1: wrong password for Q0HEAD") == 5
-    no_secrets(linmail, c, f)
+    assert out.count("login failed from 127.0.0.1: unknown user") == 1
+    assert "nosuchuser" not in out
+    no_secrets(linmail, c)
+
+
+def test_five_failures_hang_up_and_delays_grow(linmail, fake):
+    """Names are case-sensitive, as in LinBPQ. Five failures and the session
+    is dropped; after five failures from an address, the delay doubles."""
+    tport, _ = setup(linmail)
+    start(linmail, fake)
+    c = Client(tport)
+    c.until("user:")
+    for i in range(5):
+        c.line("TF")
+        c.until("password:", len(c.got))
+        c.line(SYSOP_PW)
+    c.until("Too many attempts - Disconnected\r\n", timeout=20)
+    assert c.closed()
+    assert c.text().count("user:") == 5
+
+    d = Client(tport)
+    d.until("user:")
+    d.line("tf")
+    s0 = d.until("password:", len(d.got))
+    t0 = time.time()
+    d.line("wrongpass9")
+    d.until("user:", s0, timeout=10)
+    assert time.time() - t0 >= 1.9
+    d.close()
+    no_secrets(linmail, c, d)
+
+
+def test_five_failures_on_fbb_port(linmail, fake):
+    """The head end sends its login blind: five wrong ones in one go are
+    answered one by one, with the delay between, and nothing tells it the
+    name was right."""
+    _, fport = setup(linmail)
+    start(linmail, fake)
+    f = Client(fport)
+    t0 = time.time()
+    f.send("".join(f"Q0HEAD\rwrongpass9\r" for _ in range(5)))
+    f.until("Too many attempts - Disconnected\r", timeout=20)
+    assert time.time() - t0 >= 4.5
+    assert f.closed()
+    assert f.text().count("user:") == 4 and "password:" not in f.text()
+    assert linmail.stdout().count("login failed from 127.0.0.1: wrong password for Q0HEAD") == 5
+    no_secrets(linmail, f)
 
 
 def test_echo_and_negotiation(linmail, fake):
@@ -474,22 +556,49 @@ def test_disconnects_and_concurrent_sessions(linmail, fake):
 
 
 def test_session_limits(linmail, fake):
-    """telnet_max caps the sessions; with every BBS stream busy a login waits
-    a few seconds for one, then is told."""
-    tport, fport = setup(linmail, extra="telnet_max = 3\n", cfg_extra={"Streams": 1})
+    """telnet_max caps the sessions; when every one is logged in, a new
+    connect is told. With every BBS stream busy, a login waits a few seconds
+    for one, then is told."""
+    tport, fport = setup(linmail, extra="telnet_max = 2\n", cfg_extra={"Streams": 1})
     start(linmail, fake)
     a = read_quiet_login(tport, "tf", SYSOP_PW)
     b = Client(fport)
     b.send(f"Q0CAST\r{CAST_PW}\rBBS\r")
     b.until("Sorry, no free BBS streams - try again later\r", timeout=15)
     assert b.closed()
-    c1, c2 = Client(tport), Client(tport)
-    c1.until("user:")
-    c2.until("user:")
+    p = Client(tport)
+    p.quiet()
+    p.line("g5rkt")
+    p.quiet()
+    p.line(USER_PW)
+    p.until("Type BBS")
     d = Client(fport)
     d.until("No Free Sessions\r\n")
     assert d.closed()
     a.close()
+    p.close()
+
+
+def test_logins_in_progress_give_way(linmail, fake):
+    """Connections that never log in can't lock out the head end: at most
+    three logins in progress from one address, and when the slots run out
+    the oldest login in progress is dropped to make room."""
+    tport, fport = setup(linmail, extra="telnet_max = 3\n")
+    start(linmail, fake)
+    idle = []
+    for _ in range(5):
+        c = Client(tport)
+        c.until("user:")
+        idle.append(c)
+        time.sleep(0.2)
+    assert idle[0].closed(5) and idle[1].closed(5), "only three logins in progress from one address"
+    a = read_quiet_login(tport, "tf", SYSOP_PW)       # drops another
+    h = Client(fport)                                 # every slot full: drops the oldest login in progress
+    h.send(f"Q0HEAD\r{HEAD_PW}\rBBS\r")
+    h.until("$]\r")
+    assert sum(c.closed(1) for c in idle) == 4
+    a.close()
+    h.close()
 
 
 def test_works_while_pdn_is_down(linmail, fake):
@@ -519,3 +628,145 @@ def test_port_in_use(linmail, fake):
         assert linmail.proc.poll() is None
     finally:
         blocker.close()
+
+
+def rss_kb(pid: int) -> int:
+    for line in open(f"/proc/{pid}/status"):
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return -1
+
+
+def flood(port: int, stop, login: bytes = b"", reconnect: bool = True):
+    """Send as fast as possible until told to stop, reconnecting if cut off."""
+    chunk = b"A" * 65536
+    while not stop.is_set():
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            if login:
+                s.sendall(login)
+                time.sleep(1.0)
+            while not stop.is_set():
+                s.sendall(chunk)
+        except OSError:
+            pass
+        finally:
+            s.close()
+        if not reconnect:
+            return
+        time.sleep(0.05)
+
+
+def test_flood_before_login_stalls_nothing(linmail, fake):
+    """A client that streams without logging in is cut off after a few KB,
+    and while it keeps coming back, other logins are served and memory stays
+    put."""
+    import threading
+    tport, fport = setup(linmail)
+    start(linmail, fake)
+    pid = linmail.proc.pid
+    before = rss_kb(pid)
+    stop = threading.Event()
+    t = threading.Thread(target=flood, args=(tport, stop), daemon=True)
+    t.start()
+    try:
+        time.sleep(1.0)
+        for _ in range(3):
+            t0 = time.time()
+            r = Client(fport)
+            r.send(f"Q0CAST\r{CAST_PW}\rBBS\r")
+            r.until("de N0LMB>", timeout=10)
+            assert time.time() - t0 < 5
+            r.line("B")
+            r.closed()
+        assert rss_kb(pid) - before < 20_000
+    finally:
+        stop.set()
+        t.join(10)
+    linmail.wait_stdout(r"sent too much without logging in - closed")
+
+
+def test_flood_into_the_bbs_is_held_back(linmail, fake):
+    """A logged in client that sends faster than the BBS reads is pushed back
+    by TCP, not buffered: memory stays bounded and other sessions are served."""
+    import threading
+    tport, fport = setup(linmail)
+    start(linmail, fake)
+    pid = linmail.proc.pid
+    before = rss_kb(pid)
+    stop = threading.Event()
+    t = threading.Thread(target=flood, args=(fport, stop),
+                         kwargs={"login": f"Q0CAST\r{CAST_PW}\rBBS\r".encode(), "reconnect": False}, daemon=True)
+    t.start()
+    peak = before
+    try:
+        for _ in range(3):
+            time.sleep(1.0)
+            t0 = time.time()
+            c = read_quiet_login(tport, "tf", SYSOP_PW)
+            cmd(c, "L")
+            assert time.time() - t0 < 8
+            c.line("B")
+            c.closed()
+            peak = max(peak, rss_kb(pid))
+        for _ in range(3):
+            time.sleep(1.0)
+            peak = max(peak, rss_kb(pid))
+    finally:
+        stop.set()
+        t.join(10)
+    # AddressSanitizer holds freed memory back for a while (its quarantine,
+    # 256 MB by default), so the bound means nothing under it
+    if "asan" not in BIN.name:
+        assert peak - before < 50_000, f"memory grew from {before} kB to {peak} kB"
+    assert linmail.proc.poll() is None
+
+
+def test_junk_input(linmail, fake):
+    """Random bytes, NULs, long lines, split and unfinished telnet commands,
+    before and after logging in, on both ports: nothing breaks (CI runs this
+    under AddressSanitizer too), and logins still work afterwards."""
+    import random
+    tport, fport = setup(linmail)
+    start(linmail, fake)
+    rnd = random.Random(1)
+    for port in (tport, fport):
+        for _ in range(8):
+            c = Client(port)
+            for _ in range(4):
+                try:
+                    c.send(bytes(rnd.getrandbits(8) for _ in range(rnd.randint(1, 3000))))
+                except OSError:
+                    break
+            c.close()
+        c = Client(port)
+        c.send(f"tf\r{SYSOP_PW}\rBBS\r")
+        time.sleep(0.5)
+        for _ in range(10):
+            try:
+                c.send(bytes([IAC, 250, 24]) + b"\x00" * 600 + bytes([IAC]) + b"\r\n" * 3 + b"x" * 1000)
+            except OSError:
+                break
+        c.close()
+    c = read_quiet_login(tport, "tf", SYSOP_PW)
+    cmd(c, "L")
+    c.line("B")
+    assert c.closed()
+    assert linmail.proc.poll() is None
+    no_secrets(linmail)
+
+
+def test_bad_user_lines(linmail, fake):
+    """A USER line in the wrong order, or with a field too long, is refused at
+    start-up, and nothing that might be its password is shown."""
+    tport, _ = setup(linmail, users=[
+        "USER=swapped,N0ABC,Secret#Pw1",            # callsign and password swapped
+        "USER=long," + "p" * 300 + ",N0LNG",        # LinBPQ's limit is 255
+        f"user = tf,{SYSOP_PW},N0SYS,,SYSOP",
+    ])
+    start(linmail, fake)
+    out = linmail.stdout()
+    assert "user swapped: the callsign field is not a callsign the BBS can use - user ignored" in out
+    assert "a user line has a field longer than 255 characters - user ignored" in out
+    assert "Secret#Pw1" not in out and "p" * 50 not in out
+    assert "telnet logins on 127.0.0.1 port %d, 1 user" % tport in out

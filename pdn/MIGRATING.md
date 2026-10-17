@@ -53,7 +53,9 @@ USER=Q0HEAD,password,Q0HEAD
 - Copy the `USER=` lines from the Telnet port in `bpq32.cfg` as they are: name, password, callsign, application, `SYSOP`. Names and passwords are case-sensitive, as in LinBPQ.
 - After logging in, type `BBS`, as at LinBPQ's node prompt. Programs that send `BBS` after the password carry on working. A `USER=` line with `BBS` as its application goes straight in.
 - Sysop commands (`FWD`, `K` on others' mail and so on) work for a login with `SYSOP` on its line whose BBS user also has the sysop flag, exactly as in LinBPQ.
-- Programs need only the new host and port. Nothing else about the exchange changes.
+- Programs need only the new host and port: the login and the BBS session look the same to them.
+- Two things look different by hand. The banner after the password is linmail-pdn's own, and `B` in the BBS closes the connection, where LinBPQ with `DisconnectOnClose=0` (as on GB7RDG) left you at the node with the telnet session still open.
+- A wrong login is answered after a short pause, and always with `user:` again, whether the name or the password was wrong. You have 30 seconds to log in.
 - It listens on this machine only (`127.0.0.1`) unless you set `telnet_bind`, say to `0.0.0.0` for every address. Passwords cross the network in plain text, so only open it to a network you trust.
 - **Port 8011:** pdn's own telnet console listens on `127.0.0.1:8011`, so linmail-pdn can't have 8011 on that address too. Either move pdn's console (`management.telnet.port` in the node config), or pick another `fbb_port` and change the clients' port, or bind linmail-pdn to the machine's LAN address (`telnet_bind = 192.168.1.10`), where 8011 is free and remote clients change only the host.
 - LinBPQ's telnet log records every password typed; linmail-pdn never logs, echoes or keeps them. If you're moving from LinBPQ, it's worth changing the passwords as you go.
