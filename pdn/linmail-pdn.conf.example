@@ -60,8 +60,10 @@ portmap = 1=vhf, 2=hf
 #telnet_port = 8010
 #fbb_port = 8012
 
-# Address to listen on. Default 127.0.0.1, this machine only. Passwords
-# cross the network in plain text.
+# Address to listen on. Default 127.0.0.1, this machine only. These are
+# plain telnet: passwords cross the network in plain text, and anyone who can
+# reach the port can connect and, if determined, keep the login slots busy.
+# Use loopback or a LAN you trust, never the internet.
 #telnet_bind = 0.0.0.0
 
 # Most logins at once, across both ports (LinBPQ's MAXSESSIONS)

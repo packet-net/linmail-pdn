@@ -844,3 +844,64 @@ def test_bad_user_lines(linmail, fake):
     assert "a user line has a field longer than 255 characters - user ignored" in out
     assert "Secret#Pw1" not in out and "p" * 50 not in out
     assert "telnet logins on 127.0.0.1 port %d, 1 user" % tport in out
+
+
+def trickle(port: int, stop, addr: str, held: int = 3):
+    """Keep `held` logins in progress open from one address, each sending a
+    byte every half second and never a line end (the reviewer's R3 probe).
+    Reconnects any that are dropped."""
+    socks = []
+    while not stop.is_set():
+        while len(socks) < held:
+            try:
+                s = socket.socket()
+                s.bind((addr, 0))
+                s.settimeout(2)
+                s.connect(("127.0.0.1", port))
+                socks.append(s)
+            except OSError:
+                break
+        for s in list(socks):
+            try:
+                s.send(b"x")
+            except OSError:
+                socks.remove(s)
+                s.close()
+        stop.wait(0.5)
+    for s in socks:
+        s.close()
+
+
+@pytest.mark.parametrize("addrs", [["127.0.20.1", "127.0.20.2", "127.0.20.3", "127.0.20.4"], ["127.0.0.1"]])
+def test_trickling_logins_dont_lock_out_the_head_end(linmail, fake, addrs):
+    """Logins in progress that trickle a byte every half second, three from
+    each of several addresses (or from the head end's own), can't keep the
+    head end out (review R3). Only a login whose user line has just come is
+    protected from being dropped, for two seconds and once: bytes alone
+    never protect it."""
+    import threading
+    _, fport = telnet_setup(linmail)
+    start(linmail, fake)
+    stop = threading.Event()
+    threads = [threading.Thread(target=trickle, args=(fport, stop, a), daemon=True) for a in addrs]
+    for t in threads:
+        t.start()
+    got_in = 0
+    try:
+        time.sleep(2.0)
+        for _ in range(10):
+            h = Client(fport)
+            try:
+                for line in ("Q0HEAD", HEAD_PW, "BBS"):
+                    h.line(line)
+                    time.sleep(0.002)
+                h.until("$]\r", timeout=5)
+                got_in += 1
+            except (AssertionError, OSError):
+                pass
+            h.close()
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(10)
+    assert got_in == 10, f"the head end got in {got_in} times out of 10"

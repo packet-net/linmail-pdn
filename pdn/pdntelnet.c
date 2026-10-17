@@ -77,7 +77,7 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 #define TN_FIELD 256				// Longest USER line field, as LinBPQ, with its 0
 #define TN_FAILADDRS 32				// Addresses whose failed logins are remembered
 #define TN_NOISE 20					// Connect and login failure lines a minute, at most
-#define TN_SPOKE 2000				// ms since its last input that a login in progress is not dropped for a newcomer
+#define TN_SPOKE 2000				// ms after its user line that a login is not dropped for a newcomer
 #define TN_PROMPTIDLE 900			// Seconds at the prompt, as LinBPQ's IDLETIME
 #define TN_STREAMWAIT 5				// Seconds to wait for a free BBS stream
 #define TN_CLOSEWAIT 30				// Seconds to send what is left after the BBS hangs up
@@ -133,7 +133,7 @@ struct TelnetSess
 	int Stream;						// pdnhost stream (0 based) when in the BBS, else -1
 	time_t Since;					// When the current state began
 	uint64_t ConnectNo;				// Connects counted in order, so the oldest is clear even in one ms
-	uint64_t LastInputMs;			// When it last sent anything (monotonic ms), 0 = never
+	uint64_t PassSinceMs;			// When its user line came (monotonic ms): it is waiting for the password
 	time_t LastInput;
 	char Peer[64];
 	UCHAR Line[TN_LINE + 1];
@@ -650,6 +650,7 @@ static void LoginLine(struct TelnetSess * S, char * Line)
 
 		strcpy(S->Name, Line);
 		S->State = TN_PASS;
+		S->PassSinceMs = NowMs();
 
 		if (!S->FBB)
 			Say(S, "password:");
@@ -1004,8 +1005,6 @@ static void ReadSome(struct TelnetSess * S, uint64_t NowMilli)
 
 		if (n > 0)
 		{
-			S->LastInputMs = NowMs();
-
 			if (Before)
 			{
 				S->PreLogin += n;
@@ -1041,15 +1040,25 @@ static int LoggingIn(struct TelnetSess * S)
 	return S->Sock >= 0 && (S->State == TN_USER || S->State == TN_PASS);
 }
 
+static int Protected(struct TelnetSess * S)
+{
+	// A login whose user line has just come is waiting for its password,
+	// which may be a network round trip behind (the head end writes user,
+	// password and BBS separately). It is safe for TN_SPOKE ms from its
+	// user line, once: more bytes don't renew it, so a client trickling
+	// bytes can't hold slots this way.
+
+	return S->State == TN_PASS && NowMs() - S->PassSinceMs < TN_SPOKE;
+}
+
 static struct TelnetSess * ToDrop(char * Host)
 {
 	// The login in progress to drop for a newcomer (from Host, or from
 	// anywhere): the oldest by connect order. Each candidate is read once
 	// more first, so one whose login has just arrived (the head end sends
 	// its login straight after connecting) logs in instead, and the next
-	// oldest is tried. One that has sent anything in the last TN_SPOKE ms
-	// is never dropped: it is part way through logging in (the head end
-	// sends user, password and BBS a network round trip apart). Returns
+	// oldest is tried. One just given its user line is not dropped (see
+	// Protected). Returns
 	// NULL if there is nothing to drop. A candidate that turns out to have
 	// gone is returned already closed.
 
@@ -1063,7 +1072,7 @@ static struct TelnetSess * ToDrop(char * Host)
 			struct TelnetSess * T = &Sess[i];
 
 			if (LoggingIn(T) && (Host == NULL || strcmp(T->Peer, Host) == 0)
-				&& (T->LastInputMs == 0 || NowMs() - T->LastInputMs >= TN_SPOKE)
+				&& !Protected(T)
 				&& (Oldest == NULL || T->ConnectNo < Oldest->ConnectNo))
 				Oldest = T;
 		}
@@ -1076,7 +1085,7 @@ static struct TelnetSess * ToDrop(char * Host)
 		if (Oldest->Sock < 0)
 			return Oldest;
 
-		if (LoggingIn(Oldest) && (Oldest->LastInputMs == 0 || NowMs() - Oldest->LastInputMs >= TN_SPOKE))
+		if (LoggingIn(Oldest) && !Protected(Oldest))
 			return Oldest;
 	}
 }
@@ -1304,6 +1313,21 @@ void PdnTelnetPoll()
 
 		if (S->Sock < 0)
 			continue;
+
+		if (S->NotBefore && NowMilli < S->NotBefore)
+		{
+			// In a failed login's delay nothing is read, but a client that
+			// has hung up must not hold its slot until the delay ends
+
+			UCHAR Peek;
+			int n = recv(S->Sock, &Peek, 1, MSG_PEEK | MSG_DONTWAIT);
+
+			if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+			{
+				CloseSess(S);
+				continue;
+			}
+		}
 
 		if (S->NotBefore && NowMilli >= S->NotBefore)
 			AfterDelay(S);
