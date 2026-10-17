@@ -77,6 +77,7 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 #define TN_FIELD 256				// Longest USER line field, as LinBPQ, with its 0
 #define TN_FAILADDRS 32				// Addresses whose failed logins are remembered
 #define TN_NOISE 20					// Connect and login failure lines a minute, at most
+#define TN_ACCEPTS 16				// Connects taken from each port each time round, at most
 #define TN_SPOKE 2000				// ms after its user line that a login is not dropped for a newcomer
 #define TN_PROMPTIDLE 900			// Seconds at the prompt, as LinBPQ's IDLETIME
 #define TN_STREAMWAIT 5				// Seconds to wait for a free BBS stream
@@ -1115,7 +1116,12 @@ static int CountSessions(char * Host, struct TelnetSess ** Free)
 
 static void Accept(int Listener, int FBB)
 {
-	while (1)
+	// A few at a time: a flood of connects must not keep the main loop (and
+	// so the BBS) from running. The rest wait in the kernel until next time.
+
+	int Taken;
+
+	for (Taken = 0; Taken < TN_ACCEPTS; Taken++)
 	{
 		struct sockaddr_storage Peer;
 		socklen_t PLen = sizeof(Peer);
