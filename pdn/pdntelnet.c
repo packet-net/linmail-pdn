@@ -131,6 +131,7 @@ struct TelnetSess
 	int PrevCR;						// Last input byte was a CR, so a LF or NUL after it goes
 	int Stream;						// pdnhost stream (0 based) when in the BBS, else -1
 	time_t Since;					// When the current state began
+	uint64_t ConnectNo;				// Connects counted in order, so the oldest is clear even in one ms
 	time_t LastInput;
 	char Peer[64];
 	UCHAR Line[TN_LINE + 1];
@@ -158,6 +159,7 @@ static struct FailAddr FailAddrs[TN_FAILADDRS];
 static time_t NoiseMinute = 0;
 static int NoiseCount = 0;
 static int NoiseDropped = 0;
+static uint64_t Connects = 0;
 
 static struct TelnetUser * Users = NULL;
 static int UserCount = 0;
@@ -944,7 +946,7 @@ static int Listen(int Port, char * What)
 
 	setsockopt(Sock, SOL_SOCKET, SO_REUSEADDR, &One, sizeof(One));
 
-	if (bind(Sock, Result->ai_addr, Result->ai_addrlen) != 0 || listen(Sock, 8) != 0)
+	if (bind(Sock, Result->ai_addr, Result->ai_addrlen) != 0 || listen(Sock, 64) != 0)
 	{
 		TelnetLog("cannot listen on %s port %d (%s) - %s logins off. pdn's own telnet console "
 			"uses 127.0.0.1:8011 unless told otherwise; move one of them.", BindAddr, Port, strerror(errno), What);
@@ -982,9 +984,113 @@ void PdnTelnetInit()
 		TelnetLog("no user lines in linmail-pdn.conf, so nobody can log in");
 }
 
+static int Readable(struct TelnetSess * S, uint64_t Now);
+static void Input(struct TelnetSess * S, UCHAR * Data, int Len);
+
+static void ReadSome(struct TelnetSess * S, uint64_t NowMilli)
+{
+	// Input: a little at a time, so no one session holds up the rest
+
+	UCHAR Buffer[TN_READ];
+	int n, Reads;
+
+	for (Reads = 0; Reads < TN_READS && S->Sock >= 0 && S->State != TN_FREE && Readable(S, NowMilli); Reads++)
+	{
+		int Before = S->State == TN_USER || S->State == TN_PASS;
+
+		n = recv(S->Sock, Buffer, sizeof(Buffer), MSG_DONTWAIT);
+
+		if (n > 0)
+		{
+			if (Before)
+			{
+				S->PreLogin += n;
+
+				if (S->PreLogin > TN_PRELOGIN)
+				{
+					TelnetNoise("%s sent too much without logging in - closed", S->Peer);
+					CloseSess(S);
+					break;
+				}
+			}
+
+			Input(S, Buffer, n);
+			continue;
+		}
+
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+			break;
+
+		// Closed by the client, or broken
+
+		if (S->State == TN_BBS)
+			TelnetLog("%s (%s) disconnected", Users[S->User].Call, S->Peer);
+
+		CloseSess(S);
+	}
+
+	memset(Buffer, 0, sizeof(Buffer));		// It may have held a password
+}
+
 static int LoggingIn(struct TelnetSess * S)
 {
 	return S->Sock >= 0 && (S->State == TN_USER || S->State == TN_PASS);
+}
+
+static struct TelnetSess * ToDrop(char * Host)
+{
+	// The login in progress to drop for a newcomer (from Host, or from
+	// anywhere): the oldest by connect order. Each candidate is read once
+	// more first, so one whose login has just arrived (the head end sends
+	// its login straight after connecting) logs in instead, and the next
+	// oldest is tried. Returns NULL if none is left logging in. A candidate
+	// that turns out to have gone is returned already closed.
+
+	while (1)
+	{
+		struct TelnetSess * Oldest = NULL;
+		int i;
+
+		for (i = 0; i < TN_MAXSESS; i++)
+		{
+			struct TelnetSess * T = &Sess[i];
+
+			if (LoggingIn(T) && (Host == NULL || strcmp(T->Peer, Host) == 0)
+				&& (Oldest == NULL || T->ConnectNo < Oldest->ConnectNo))
+				Oldest = T;
+		}
+
+		if (Oldest == NULL)
+			return NULL;
+
+		ReadSome(Oldest, NowMs());
+
+		if (Oldest->Sock < 0 || LoggingIn(Oldest))
+			return Oldest;
+	}
+}
+
+static int CountSessions(char * Host, struct TelnetSess ** Free)
+{
+	// Sessions in use, or (with Host) logins in progress from there
+
+	int i, Count = 0;
+
+	for (i = 0; i < TN_MAXSESS; i++)
+	{
+		struct TelnetSess * T = &Sess[i];
+
+		if (T->Sock < 0)
+		{
+			if (Free && *Free == NULL)
+				*Free = T;
+			continue;
+		}
+
+		if (Host == NULL || (LoggingIn(T) && strcmp(T->Peer, Host) == 0))
+			Count++;
+	}
+	return Count;
 }
 
 static void Accept(int Listener, int FBB)
@@ -993,68 +1099,37 @@ static void Accept(int Listener, int FBB)
 	{
 		struct sockaddr_storage Peer;
 		socklen_t PLen = sizeof(Peer);
-		struct TelnetSess * S = NULL, * Oldest = NULL, * OldestHere = NULL;
+		struct TelnetSess * S = NULL, * T;
 		char Host[64] = "?";
 		int Sock = accept(Listener, (struct sockaddr *)&Peer, &PLen);
-		int i, Count = 0, FromHost = 0, One = 1;
+		int One = 1;
 
 		if (Sock < 0)
 			return;
 
 		getnameinfo((struct sockaddr *)&Peer, PLen, Host, sizeof(Host), NULL, 0, NI_NUMERICHOST);
 
-		for (i = 0; i < TN_MAXSESS; i++)
-		{
-			struct TelnetSess * T = &Sess[i];
-
-			if (T->Sock < 0)
-			{
-				if (S == NULL)
-					S = T;
-				continue;
-			}
-
-			Count++;
-
-			if (LoggingIn(T))
-			{
-				if (strcmp(T->Peer, Host) == 0)
-				{
-					FromHost++;
-
-					if (OldestHere == NULL || T->Since < OldestHere->Since)
-						OldestHere = T;
-				}
-
-				if (Oldest == NULL || T->Since < Oldest->Since)
-					Oldest = T;
-			}
-		}
-
-		if (FromHost >= TN_PERADDR)
+		if (CountSessions(Host, NULL) >= TN_PERADDR && (T = ToDrop(Host)) != NULL)
 		{
 			// Only a few logins in progress from one address: the oldest of
 			// them makes way, so one address can't take every slot, and
 			// can't lock out a client of its own that logs in promptly
 
-			TelnetNoise("%d logins in progress from %s - dropped the oldest", FromHost, Host);
-
-			if (Oldest == OldestHere)
-				Oldest = NULL;
-
-			CloseSess(OldestHere);
-			Count--;
-
-			if (S == NULL)
-				S = OldestHere;
+			if (T->Sock >= 0)
+			{
+				TelnetNoise("%d logins in progress from %s - dropped the oldest", TN_PERADDR, Host);
+				CloseSess(T);
+			}
 		}
 
-		if (Count >= MaxSessions || S == NULL)
+		if (CountSessions(NULL, &S) >= MaxSessions || S == NULL)
 		{
-			// Full. Make room by dropping the session that has been trying
-			// to log in longest, so idle connections can't lock everyone out.
+			// Full. Make room by dropping the oldest login in progress, so
+			// connections that never log in can't lock everyone out.
 
-			if (Oldest == NULL || Oldest->Sock < 0)
+			T = ToDrop(NULL);
+
+			if (T == NULL)
 			{
 				TelnetNoise("connect from %s refused - all %d sessions in use", Host, MaxSessions);
 				send(Sock, "No Free Sessions\r\n", 18, MSG_NOSIGNAL | MSG_DONTWAIT);
@@ -1062,11 +1137,14 @@ static void Accept(int Listener, int FBB)
 				continue;
 			}
 
-			TelnetNoise("all %d sessions in use - dropped the login in progress from %s", MaxSessions, Oldest->Peer);
-			CloseSess(Oldest);
+			if (T->Sock >= 0)
+			{
+				TelnetNoise("all %d sessions in use - dropped the login in progress from %s", MaxSessions, T->Peer);
+				CloseSess(T);
+			}
 
-			if (S == NULL)
-				S = Oldest;
+			S = NULL;
+			CountSessions(NULL, &S);
 		}
 
 		fcntl(Sock, F_SETFL, fcntl(Sock, F_GETFL) | O_NONBLOCK);
@@ -1079,6 +1157,7 @@ static void Accept(int Listener, int FBB)
 		S->User = -1;
 		S->Stream = -1;
 		S->Since = S->LastInput = time(NULL);
+		S->ConnectNo = ++Connects;
 		strcpy(S->Peer, Host);
 
 		TelnetNoise("connect from %s on the %s port", Host, FBB ? "FBB" : "telnet");
@@ -1092,6 +1171,12 @@ static void Accept(int Listener, int FBB)
 			S->SGAOffered = S->EchoOffered = 1;
 			Say(S, "user:");
 		}
+
+		// Read it at once: a client that sends its login blind (the head
+		// end) is dealt with before any later connect in this pass, and
+		// one that has already gone frees its slot
+
+		ReadSome(S, NowMs());
 	}
 }
 
@@ -1184,8 +1269,7 @@ void PdnTelnetPoll()
 {
 	time_t Now = time(NULL);
 	uint64_t NowMilli = NowMs();
-	UCHAR Buffer[TN_READ];
-	int i, n, Reads;
+	int i;
 
 	if (TelnetListen >= 0)
 		Accept(TelnetListen, FALSE);
@@ -1203,47 +1287,11 @@ void PdnTelnetPoll()
 		if (S->NotBefore && NowMilli >= S->NotBefore)
 			AfterDelay(S);
 
-		// Input: a little at a time, so no one session holds up the rest
-
-		for (Reads = 0; Reads < TN_READS && S->Sock >= 0 && S->State != TN_FREE && Readable(S, NowMilli); Reads++)
-		{
-			int Before = LoggingIn(S);
-
-			n = recv(S->Sock, Buffer, sizeof(Buffer), MSG_DONTWAIT);
-
-			if (n > 0)
-			{
-				if (Before)
-				{
-					S->PreLogin += n;
-
-					if (S->PreLogin > TN_PRELOGIN)
-					{
-						TelnetNoise("%s sent too much without logging in - closed", S->Peer);
-						CloseSess(S);
-						break;
-					}
-				}
-
-				Input(S, Buffer, n);
-				continue;
-			}
-
-			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
-				break;
-
-			// Closed by the client, or broken
-
-			if (S->State == TN_BBS)
-				TelnetLog("%s (%s) disconnected", Users[S->User].Call, S->Peer);
-
-			CloseSess(S);
-		}
-
-		memset(Buffer, 0, sizeof(Buffer));		// It may have held a password
+		ReadSome(S, NowMilli);
 
 		if (S->Sock < 0)
 			continue;
+
 
 		FlushOut(S);
 

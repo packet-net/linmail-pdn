@@ -590,15 +590,80 @@ def test_logins_in_progress_give_way(linmail, fake):
         c = Client(tport)
         c.until("user:")
         idle.append(c)
-        time.sleep(0.2)
     assert idle[0].closed(5) and idle[1].closed(5), "only three logins in progress from one address"
-    a = read_quiet_login(tport, "tf", SYSOP_PW)       # drops another
-    h = Client(fport)                                 # every slot full: drops the oldest login in progress
+    a = read_quiet_login(tport, "tf", SYSOP_PW)        # drops idle[2]
+    h = Client(fport)                                  # every slot full: drops the oldest login in progress
     h.send(f"Q0HEAD\r{HEAD_PW}\rBBS\r")
     h.until("$]\r")
-    assert sum(c.closed(1) for c in idle) == 4
+    states = [c.closed(1) for c in idle]
+    assert states == [True, True, True, True, False], states
     a.close()
     h.close()
+
+
+def churn(port: int, stop, base: int):
+    """Connect from rotating 127.<base>.x.y addresses as fast as possible,
+    never logging in, keeping the last 200 open (the reviewer's R1 probe)."""
+    n = 0
+    socks = []
+    while not stop.is_set():
+        n += 1
+        try:
+            s = socket.socket()
+            s.bind((f"127.{base}.{(n >> 8) & 255}.{(n & 255) or 1}", 0))
+            s.setblocking(False)
+            try:
+                s.connect(("127.0.0.1", port))
+            except BlockingIOError:
+                pass
+            socks.append(s)
+            if len(socks) > 200:
+                socks.pop(0).close()
+        except OSError:
+            time.sleep(0.001)
+    for s in socks:
+        s.close()
+
+
+def test_head_end_gets_in_through_connect_churn(linmail, fake):
+    """Connects that never log in, as fast as they come, from thousands of
+    loopback addresses on both ports, can't drop the head end's login (review
+    R1). A new connection is read as soon as it is accepted, the login
+    dropped for a newcomer is the oldest by connect order (not by the second
+    it came in), and it is read once more first, so a login that has just
+    arrived logs in instead of being dropped."""
+    import threading
+    tport, fport = setup(linmail)
+    start(linmail, fake)
+    stop = threading.Event()
+    threads = [threading.Thread(target=churn, args=(port, stop, base), daemon=True)
+               for base, port in ((10, tport), (11, fport))]
+    for t in threads:
+        t.start()
+    got_in, dropped, unreachable = 0, 0, 0
+    try:
+        time.sleep(1.0)
+        for _ in range(10):
+            try:
+                h = Client(fport)
+            except OSError:
+                # The churn can swamp the kernel's own connect queue, so a
+                # connect may time out before linmail-pdn ever sees it
+                unreachable += 1
+                continue
+            h.send(f"Q0HEAD\r{HEAD_PW}\rBBS\r")
+            try:
+                h.until("$]\r", timeout=10)
+                got_in += 1
+            except AssertionError:
+                dropped += 1
+            h.close()
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(10)
+    assert dropped == 0, f"the head end was dropped {dropped} times ({got_in} in, {unreachable} never connected)"
+    assert got_in >= 2, f"only {got_in} of 10 got in ({unreachable} never connected)"
 
 
 def test_works_while_pdn_is_down(linmail, fake):
