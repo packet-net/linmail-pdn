@@ -91,7 +91,7 @@ class Client:
         self.s.close()
 
 
-def setup(linmail, *, users=None, extra="", partners=(), cfg_extra=None, sysops=("N0SYS",)) -> tuple[int, int]:
+def telnet_setup(linmail, *, users=None, extra="", partners=(), cfg_extra=None, sysops=("N0SYS",)) -> tuple[int, int]:
     """linmail.cfg and linmail-pdn.conf with both login ports. Returns them."""
     tport, fport = free_port(), free_port()
     users = users if users is not None else [
@@ -182,7 +182,7 @@ def test_nothing_listens_unless_configured(linmail, fake):
 def test_sysop_scripts_exchange(linmail, fake):
     """bbs-trim-digests, step for step: log in on the telnet port as a sysop,
     BBS, list a sender's messages with L<, kill some with K, FWD QUEUE, B."""
-    tport, _ = setup(linmail, partners=[partner(script=(), at="N0BPQ")])
+    tport, _ = telnet_setup(linmail, partners=[partner(script=(), at="N0BPQ")])
     start(linmail, fake)
 
     c = Client(tport)
@@ -228,7 +228,7 @@ def test_sysop_scripts_exchange(linmail, fake):
 
 def test_fwd_on_heard_exchange(linmail, fake):
     """fwd-on-heard: read_quiet login, BBS, FWD QUEUE, FWD <bbs> NOW."""
-    tport, _ = setup(linmail, partners=[partner(script=("C 1 N0BPQ-1",), at="N0BPQ")])
+    tport, _ = telnet_setup(linmail, partners=[partner(script=("C 1 N0BPQ-1",), at="N0BPQ")])
     start(linmail, fake, "-m", "1=bpq")
     c = read_quiet_login(tport, "tf", SYSOP_PW)
     assert "N0BPQ" not in cmd(c, "FWD QUEUE")
@@ -248,7 +248,7 @@ def test_sysop_needs_both_flags(linmail, fake):
         f"user = q0cast,{CAST_PW},N0SYS",           # BBS record only
         f"user = q0head,{HEAD_PW},N0OTH,,SYSOP",    # USER line only
     ]
-    tport, _ = setup(linmail, users=users)
+    tport, _ = telnet_setup(linmail, users=users)
     start(linmail, fake)
     for name, pw, sysop in (("tf", SYSOP_PW, True), ("g5rkt", USER_PW, False),
                             ("q0cast", CAST_PW, False), ("q0head", HEAD_PW, False)):
@@ -277,7 +277,7 @@ def test_head_end_collects_a_bulletin_on_fbb_port(linmail, fake, protocol):
         p.send_new_immediately = False
         p.fwd_interval = 3600
         return p
-    tport, fport = setup(linmail, partners=[b1_partner("Q0HEAD"), b1_partner("N0BPQ")])
+    tport, fport = telnet_setup(linmail, partners=[b1_partner("Q0HEAD"), b1_partner("N0BPQ")])
     start(linmail, fake)
 
     # The bulletin, from a sysop at the telnet port
@@ -354,7 +354,7 @@ def test_head_end_collects_a_bulletin_on_fbb_port(linmail, fake, protocol):
 def test_report_reader_on_fbb_port(linmail, fake):
     """The head end as Q0CAST: user, password, BBS, wait for a prompt ending
     in >, L> MCAST, wait for the next prompt, B."""
-    _, fport = setup(linmail, sysops=("N0SYS", "Q0CAST"))
+    _, fport = telnet_setup(linmail, sysops=("N0SYS", "Q0CAST"))
     start(linmail, fake)
     r = Client(fport)
     r.send(f"Q0CAST\r{CAST_PW}\rBBS\r")
@@ -374,7 +374,7 @@ def test_b2_forward_in_on_fbb_port(linmail, fake):
     the FBB port arrives intact: nothing is taken for telnet commands."""
     rec = json.loads((DATA / "b2-from-linbpq.json").read_text())
     assert b"\xff" in rec["binary"].encode("latin-1")
-    _, fport = setup(linmail, partners=[partner(script=())],
+    _, fport = telnet_setup(linmail, partners=[partner(script=())],
                      users=[f"USER=n0bpq,{USER_PW},N0BPQ-1"])
     start(linmail, fake)
     b = Client(fport)
@@ -394,7 +394,7 @@ def test_b2_forward_in_on_fbb_port(linmail, fake):
 def test_failed_login_is_delayed_and_says_nothing(linmail, fake):
     """A wrong password and an unknown name get the same answer, a second
     later: a new line, then the user prompt again. The right login still works."""
-    tport, _ = setup(linmail)
+    tport, _ = telnet_setup(linmail)
     start(linmail, fake)
     answers = []
     c = Client(tport)
@@ -426,7 +426,7 @@ def test_failed_login_is_delayed_and_says_nothing(linmail, fake):
 def test_five_failures_hang_up_and_delays_grow(linmail, fake):
     """Names are case-sensitive, as in LinBPQ. Five failures and the session
     is dropped; after five failures from an address, the delay doubles."""
-    tport, _ = setup(linmail)
+    tport, _ = telnet_setup(linmail)
     start(linmail, fake)
     c = Client(tport)
     c.until("user:")
@@ -454,7 +454,7 @@ def test_five_failures_on_fbb_port(linmail, fake):
     """The head end sends its login blind: five wrong ones in one go are
     answered one by one, with the delay between, and nothing tells it the
     name was right."""
-    _, fport = setup(linmail)
+    _, fport = telnet_setup(linmail)
     start(linmail, fake)
     f = Client(fport)
     t0 = time.time()
@@ -470,7 +470,7 @@ def test_five_failures_on_fbb_port(linmail, fake):
 def test_echo_and_negotiation(linmail, fake):
     """A real telnet client asks for echo: names and commands come back, the
     password never does."""
-    tport, _ = setup(linmail)
+    tport, _ = telnet_setup(linmail)
     start(linmail, fake)
     c = Client(tport)
     c.until("user:")
@@ -493,7 +493,7 @@ def test_straight_in_and_pasted_user_line(linmail, fake):
     The line is read as LinBPQ reads it: a # is part of the password, a ;
     starts a comment, and each field ends at a space."""
     users = [f"USER=n0abc,{SYSOP_PW} ignored,N0ABC,BBS   ; a comment"]
-    tport, _ = setup(linmail, users=users)
+    tport, _ = telnet_setup(linmail, users=users)
     start(linmail, fake)
     c = Client(tport)
     c.until("user:")
@@ -506,7 +506,7 @@ def test_straight_in_and_pasted_user_line(linmail, fake):
 
 
 def test_disconnects_and_concurrent_sessions(linmail, fake):
-    tport, fport = setup(linmail)
+    tport, fport = telnet_setup(linmail)
     start(linmail, fake)
 
     # Two at once, on both ports
@@ -559,7 +559,7 @@ def test_session_limits(linmail, fake):
     """telnet_max caps the sessions; when every one is logged in, a new
     connect is told. With every BBS stream busy, a login waits a few seconds
     for one, then is told."""
-    tport, fport = setup(linmail, extra="telnet_max = 2\n", cfg_extra={"Streams": 1})
+    tport, fport = telnet_setup(linmail, extra="telnet_max = 2\n", cfg_extra={"Streams": 1})
     start(linmail, fake)
     a = read_quiet_login(tport, "tf", SYSOP_PW)
     b = Client(fport)
@@ -583,7 +583,7 @@ def test_logins_in_progress_give_way(linmail, fake):
     """Connections that never log in can't lock out the head end: at most
     three logins in progress from one address, and when the slots run out
     the oldest login in progress is dropped to make room."""
-    tport, fport = setup(linmail, extra="telnet_max = 3\n")
+    tport, fport = telnet_setup(linmail, extra="telnet_max = 3\n")
     start(linmail, fake)
     idle = []
     for _ in range(5):
@@ -625,15 +625,18 @@ def churn(port: int, stop, base: int):
         s.close()
 
 
-def test_head_end_gets_in_through_connect_churn(linmail, fake):
+@pytest.mark.parametrize("gap", [0, 0.002, 0.04])
+def test_head_end_gets_in_through_connect_churn(linmail, fake, gap):
     """Connects that never log in, as fast as they come, from thousands of
     loopback addresses on both ports, can't drop the head end's login (review
     R1). A new connection is read as soon as it is accepted, the login
     dropped for a newcomer is the oldest by connect order (not by the second
     it came in), and it is read once more first, so a login that has just
-    arrived logs in instead of being dropped."""
+    arrived logs in instead of being dropped. A login that has sent
+    anything in the last two seconds is never dropped, so a head end whose
+    user, password and BBS lines come a round trip apart gets in too."""
     import threading
-    tport, fport = setup(linmail)
+    tport, fport = telnet_setup(linmail)
     start(linmail, fake)
     stop = threading.Event()
     threads = [threading.Thread(target=churn, args=(port, stop, base), daemon=True)
@@ -651,10 +654,16 @@ def test_head_end_gets_in_through_connect_churn(linmail, fake):
                 # connect may time out before linmail-pdn ever sees it
                 unreachable += 1
                 continue
-            h.send(f"Q0HEAD\r{HEAD_PW}\rBBS\r")
             try:
+                # As the head end: user, password and BBS as separate writes,
+                # a network round trip apart on a LAN (review R2)
+                for line in ("Q0HEAD", HEAD_PW, "BBS"):
+                    h.line(line)
+                    time.sleep(gap)
                 h.until("$]\r", timeout=10)
                 got_in += 1
+            except OSError:
+                dropped += 1
             except AssertionError:
                 dropped += 1
             h.close()
@@ -668,7 +677,7 @@ def test_head_end_gets_in_through_connect_churn(linmail, fake):
 
 def test_works_while_pdn_is_down(linmail, fake):
     """Telnet logins don't need the RHP connection."""
-    tport, _ = setup(linmail)
+    tport, _ = telnet_setup(linmail)
     linmail.start("-r", "127.0.0.1:1")
     linmail.wait_stdout(r"telnet logins on")
     c = read_quiet_login(tport, "tf", SYSOP_PW)
@@ -727,7 +736,7 @@ def test_flood_before_login_stalls_nothing(linmail, fake):
     and while it keeps coming back, other logins are served and memory stays
     put."""
     import threading
-    tport, fport = setup(linmail)
+    tport, fport = telnet_setup(linmail)
     start(linmail, fake)
     pid = linmail.proc.pid
     before = rss_kb(pid)
@@ -755,7 +764,7 @@ def test_flood_into_the_bbs_is_held_back(linmail, fake):
     """A logged in client that sends faster than the BBS reads is pushed back
     by TCP, not buffered: memory stays bounded and other sessions are served."""
     import threading
-    tport, fport = setup(linmail)
+    tport, fport = telnet_setup(linmail)
     start(linmail, fake)
     pid = linmail.proc.pid
     before = rss_kb(pid)
@@ -792,7 +801,7 @@ def test_junk_input(linmail, fake):
     before and after logging in, on both ports: nothing breaks (CI runs this
     under AddressSanitizer too), and logins still work afterwards."""
     import random
-    tport, fport = setup(linmail)
+    tport, fport = telnet_setup(linmail)
     start(linmail, fake)
     rnd = random.Random(1)
     for port in (tport, fport):
@@ -824,7 +833,7 @@ def test_junk_input(linmail, fake):
 def test_bad_user_lines(linmail, fake):
     """A USER line in the wrong order, or with a field too long, is refused at
     start-up, and nothing that might be its password is shown."""
-    tport, _ = setup(linmail, users=[
+    tport, _ = telnet_setup(linmail, users=[
         "USER=swapped,N0ABC,Secret#Pw1",            # callsign and password swapped
         "USER=long," + "p" * 300 + ",N0LNG",        # LinBPQ's limit is 255
         f"user = tf,{SYSOP_PW},N0SYS,,SYSOP",

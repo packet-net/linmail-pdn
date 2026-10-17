@@ -77,6 +77,7 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 #define TN_FIELD 256				// Longest USER line field, as LinBPQ, with its 0
 #define TN_FAILADDRS 32				// Addresses whose failed logins are remembered
 #define TN_NOISE 20					// Connect and login failure lines a minute, at most
+#define TN_SPOKE 2000				// ms since its last input that a login in progress is not dropped for a newcomer
 #define TN_PROMPTIDLE 900			// Seconds at the prompt, as LinBPQ's IDLETIME
 #define TN_STREAMWAIT 5				// Seconds to wait for a free BBS stream
 #define TN_CLOSEWAIT 30				// Seconds to send what is left after the BBS hangs up
@@ -132,6 +133,7 @@ struct TelnetSess
 	int Stream;						// pdnhost stream (0 based) when in the BBS, else -1
 	time_t Since;					// When the current state began
 	uint64_t ConnectNo;				// Connects counted in order, so the oldest is clear even in one ms
+	uint64_t LastInputMs;			// When it last sent anything (monotonic ms), 0 = never
 	time_t LastInput;
 	char Peer[64];
 	UCHAR Line[TN_LINE + 1];
@@ -1002,6 +1004,8 @@ static void ReadSome(struct TelnetSess * S, uint64_t NowMilli)
 
 		if (n > 0)
 		{
+			S->LastInputMs = NowMs();
+
 			if (Before)
 			{
 				S->PreLogin += n;
@@ -1043,8 +1047,11 @@ static struct TelnetSess * ToDrop(char * Host)
 	// anywhere): the oldest by connect order. Each candidate is read once
 	// more first, so one whose login has just arrived (the head end sends
 	// its login straight after connecting) logs in instead, and the next
-	// oldest is tried. Returns NULL if none is left logging in. A candidate
-	// that turns out to have gone is returned already closed.
+	// oldest is tried. One that has sent anything in the last TN_SPOKE ms
+	// is never dropped: it is part way through logging in (the head end
+	// sends user, password and BBS a network round trip apart). Returns
+	// NULL if there is nothing to drop. A candidate that turns out to have
+	// gone is returned already closed.
 
 	while (1)
 	{
@@ -1056,6 +1063,7 @@ static struct TelnetSess * ToDrop(char * Host)
 			struct TelnetSess * T = &Sess[i];
 
 			if (LoggingIn(T) && (Host == NULL || strcmp(T->Peer, Host) == 0)
+				&& (T->LastInputMs == 0 || NowMs() - T->LastInputMs >= TN_SPOKE)
 				&& (Oldest == NULL || T->ConnectNo < Oldest->ConnectNo))
 				Oldest = T;
 		}
@@ -1065,7 +1073,10 @@ static struct TelnetSess * ToDrop(char * Host)
 
 		ReadSome(Oldest, NowMs());
 
-		if (Oldest->Sock < 0 || LoggingIn(Oldest))
+		if (Oldest->Sock < 0)
+			return Oldest;
+
+		if (LoggingIn(Oldest) && (Oldest->LastInputMs == 0 || NowMs() - Oldest->LastInputMs >= TN_SPOKE))
 			return Oldest;
 	}
 }
@@ -1120,6 +1131,16 @@ static void Accept(int Listener, int FBB)
 				TelnetNoise("%d logins in progress from %s - dropped the oldest", TN_PERADDR, Host);
 				CloseSess(T);
 			}
+		}
+
+		if (CountSessions(Host, NULL) >= TN_PERADDR)
+		{
+			// All of them are part way through logging in: this one waits
+
+			TelnetNoise("connect from %s refused - %d logins from there already in progress", Host, TN_PERADDR);
+			send(Sock, "No Free Sessions\r\n", 18, MSG_NOSIGNAL | MSG_DONTWAIT);
+			close(Sock);
+			continue;
 		}
 
 		if (CountSessions(NULL, &S) >= MaxSessions || S == NULL)
