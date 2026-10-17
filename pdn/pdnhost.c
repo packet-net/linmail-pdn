@@ -34,9 +34,15 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 //			  Busy from, Failure with). Once the open succeeds the stream is
 //			  transparent, so later script lines go to the far node as data.
 //
+//	Local:    a telnet or FBB login (pdntelnet.c) gets a stream through
+//			  PdnLocalConnect, in the same way as an inbound connect. The
+//			  stream's data goes to and from the login's socket instead of an
+//			  RHP handle.
+//
 //	All RHP socket I/O happens on the main thread in PdnHostPoll. API calls
 //	from other threads (the mail code's connect delay threads) only change
 //	stream state under PdnLock, and queue RHP writes on the socket directly.
+//	The telnet logins are serviced from PdnHostPoll too, under PdnLock.
 
 #include "bpqmail.h"
 #include "pdnhost.h"
@@ -56,6 +62,7 @@ BPQVECSTRUC BPQHOSTVECTOR[BPQHOSTSTREAMS + 5];
 #define PDN_NODECMD	1		// Outbound, talking to the (emulated) node command handler
 #define PDN_OPENING	2		// Outbound, RHP open sent, waiting for openReply
 #define PDN_LINKED	3		// Attached to a connected RHP stream handle
+#define PDN_LOCAL	4		// Attached to a telnet or FBB login (pdntelnet.c)
 
 struct PdnBuf
 {
@@ -83,6 +90,8 @@ struct PdnStream
 	char CmdBuf[512];			// Node command line being assembled
 	int CmdLen;
 	int RemoteClosed;			// pdn closed the handle; end once the data is read
+	int Local;					// PDN_LOCAL: the login's id + 1, 0 once it has gone
+	int Secure;					// PDN_LOCAL: a sysop login, reported as a secure session
 };
 
 static struct PdnStream Streams[PDN_MAXSTREAMS];
@@ -543,6 +552,16 @@ static void EndSession(int n)
 
 	struct PdnStream * STREAM = &Streams[n];
 
+	if (STREAM->Local)
+	{
+		// A telnet login: it sends what it has, then closes
+
+		int Id = STREAM->Local - 1;
+
+		STREAM->Local = 0;
+		PdnTelnetHangup(Id);
+	}
+
 	FreeRx(STREAM);
 	STREAM->Mode = PDN_IDLE;
 	STREAM->Handle = 0;
@@ -551,6 +570,7 @@ static void EndSession(int n)
 	STREAM->TxOutstanding = 0;
 	STREAM->CmdLen = 0;
 	STREAM->RemoteClosed = 0;
+	STREAM->Secure = 0;
 	STREAM->Remote[0] = 0;
 	STREAM->PortLabel[0] = 0;
 
@@ -587,7 +607,7 @@ static int FindStreamByOpenId(int Id)
 
 //	Emulated node command handler (outbound sessions before the RHP open)
 
-static int IsCallsign(char * Call)
+int PdnIsCallsign(char * Call)
 {
 	// Callsign with optional numeric SSID 0-15
 
@@ -673,7 +693,7 @@ static void NodeConnect(int n, char ** Tok, int Count, char * Line)
 
 	_strupr(Call);
 
-	if (!IsCallsign(Call))
+	if (!PdnIsCallsign(Call))
 	{
 		// BPQ would try NET/ROM aliases and applications here. pdn's RHP open
 		// is AX.25 only.
@@ -1113,7 +1133,7 @@ static void ProcessAccept(json_t * Msg)
 	Call[15] = 0;
 	_strupr(Call);
 
-	if (!IsCallsign(Call))
+	if (!PdnIsCallsign(Call))
 	{
 		json_t * Req;
 		int Id;
@@ -1154,6 +1174,24 @@ static void ProcessAccept(json_t * Msg)
 	RHPClose(Child);
 }
 
+static int FreeInboundStream()
+{
+	// A BBS stream an incoming caller can have. One whose last disconnect the
+	// mail code has not yet seen is not free.
+
+	int n;
+
+	for (n = 0; n < PDN_MAXSTREAMS; n++)
+	{
+		BPQVECSTRUC * SESS = &BPQHOSTVECTOR[n];
+
+		if ((SESS->HOSTFLAGS & 0x80) && SESS->HOSTAPPLMASK && SESS->HOSTSESSION == NULL
+			&& (SESS->HOSTFLAGS & 3) == 0 && Streams[n].Mode == PDN_IDLE)
+			return n;
+	}
+	return -1;
+}
+
 static void AttachPending()
 {
 	int i, n;
@@ -1166,35 +1204,30 @@ static void AttachPending()
 		if (PEND->Child == 0)
 			continue;
 
-		for (n = 0; n < PDN_MAXSTREAMS; n++)
+		n = FreeInboundStream();
+
+		if (n >= 0)
 		{
-			BPQVECSTRUC * SESS = &BPQHOSTVECTOR[n];
+			struct PdnStream * STREAM = &Streams[n];
 
-			if ((SESS->HOSTFLAGS & 0x80) && SESS->HOSTAPPLMASK && SESS->HOSTSESSION == NULL
-				&& (SESS->HOSTFLAGS & 3) == 0 && Streams[n].Mode == PDN_IDLE)
-			{
-				struct PdnStream * STREAM = &Streams[n];
+			FreeRx(STREAM);
+			STREAM->Mode = PDN_LINKED;
+			STREAM->Handle = PEND->Child;
+			STREAM->Incoming = 1;
+			STREAM->TxOutstanding = 0;
+			strcpy(STREAM->Remote, PEND->Remote);
+			strcpy(STREAM->PortLabel, PEND->Port);
 
-				FreeRx(STREAM);
-				STREAM->Mode = PDN_LINKED;
-				STREAM->Handle = PEND->Child;
-				STREAM->Incoming = 1;
-				STREAM->TxOutstanding = 0;
-				strcpy(STREAM->Remote, PEND->Remote);
-				strcpy(STREAM->PortLabel, PEND->Port);
+			StartSession(n, PEND->Local);
 
-				StartSession(n, PEND->Local);
+			PdnLog("Stream %d: incoming connect from %s to %s on port %s (RHP handle %d)",
+				n + 1, PEND->Remote, PEND->Local, PEND->Port, PEND->Child);
 
-				PdnLog("Stream %d: incoming connect from %s to %s on port %s (RHP handle %d)",
-					n + 1, PEND->Remote, PEND->Local, PEND->Port, PEND->Child);
+			if (PEND->BufLen)
+				QueueRx(n, PEND->Buf, PEND->BufLen);
 
-				if (PEND->BufLen)
-					QueueRx(n, PEND->Buf, PEND->BufLen);
-
-				free(PEND->Buf);
-				memset(PEND, 0, sizeof(struct PdnPending));
-				break;
-			}
+			free(PEND->Buf);
+			memset(PEND, 0, sizeof(struct PdnPending));
 		}
 
 		if (PEND->Child && Now - PEND->Since > 5)
@@ -1205,6 +1238,90 @@ static void AttachPending()
 			memset(PEND, 0, sizeof(struct PdnPending));
 		}
 	}
+}
+
+//	Logins that arrive some other way than pdn: telnet and FBB logins
+//	(pdntelnet.c). The stream is taken and started exactly as for an inbound
+//	connect above, so the mail code sees the same thing. A login with SYSOP
+//	on its USER line counts as a secure session, as on LinBPQ.
+
+int PdnLocalConnect(char * Call, int Secure, int Id, char * Peer)
+{
+	struct PdnStream * STREAM;
+	int n;
+
+	pthread_mutex_lock(&PdnLock);
+
+	n = FreeInboundStream();
+
+	if (n < 0)
+	{
+		pthread_mutex_unlock(&PdnLock);
+		return -1;
+	}
+
+	STREAM = &Streams[n];
+
+	FreeRx(STREAM);
+	STREAM->Mode = PDN_LOCAL;
+	STREAM->Handle = 0;
+	STREAM->Incoming = 1;
+	STREAM->TxOutstanding = 0;
+	STREAM->Local = Id + 1;
+	STREAM->Secure = Secure;
+	strncpy(STREAM->Remote, Call, sizeof(STREAM->Remote) - 1);
+	STREAM->PortLabel[0] = 0;
+
+	StartSession(n, PdnCfg.AppCall);
+
+	PdnLog("Stream %d: telnet login from %s as %s%s", n + 1, Peer, Call, Secure ? " (secure session)" : "");
+
+	pthread_mutex_unlock(&PdnLock);
+	return n;
+}
+
+void PdnLocalData(int n, UCHAR * Data, int Len)
+{
+	pthread_mutex_lock(&PdnLock);
+
+	if (n >= 0 && n < PDN_MAXSTREAMS && Streams[n].Mode == PDN_LOCAL && !Streams[n].RemoteClosed)
+		QueueRx(n, Data, Len);
+
+	pthread_mutex_unlock(&PdnLock);
+}
+
+void PdnLocalClosed(int n)
+{
+	// As an RHP close: anything the caller sent last still reaches the mail
+	// code before it hears about the disconnect (see FinishRemoteClose)
+
+	pthread_mutex_lock(&PdnLock);
+
+	if (n >= 0 && n < PDN_MAXSTREAMS && Streams[n].Mode == PDN_LOCAL && Streams[n].Local)
+	{
+		PdnLog("Stream %d: %s disconnected", n + 1, Streams[n].Remote);
+
+		Streams[n].Local = 0;
+		Streams[n].RemoteClosed = 1;
+
+		if (Streams[n].RxHead == NULL)
+			EndSession(n);
+	}
+
+	pthread_mutex_unlock(&PdnLock);
+}
+
+int PdnLocalBacklog(int n)
+{
+	int Bytes = 0;
+
+	pthread_mutex_lock(&PdnLock);
+
+	if (n >= 0 && n < PDN_MAXSTREAMS && Streams[n].Mode == PDN_LOCAL)
+		Bytes = Streams[n].RxCount * 256;
+
+	pthread_mutex_unlock(&PdnLock);
+	return Bytes;
 }
 
 static struct PdnPending * FindPending(int Handle)
@@ -1319,7 +1436,8 @@ static void FinishRemoteClose()
 
 	for (n = 0; n < PDN_MAXSTREAMS; n++)
 	{
-		if (Streams[n].RemoteClosed && Streams[n].Mode == PDN_LINKED && Streams[n].RxHead == NULL)
+		if (Streams[n].RemoteClosed && (Streams[n].Mode == PDN_LINKED || Streams[n].Mode == PDN_LOCAL)
+			&& Streams[n].RxHead == NULL)
 			EndSession(n);
 	}
 }
@@ -1552,7 +1670,7 @@ static void CheckIdle(time_t Now)
 		struct PdnStream * STREAM = &Streams[n];
 
 		if (BPQHOSTVECTOR[n].HOSTSESSION && STREAM->IdleTime > 0
-			&& (STREAM->Mode == PDN_NODECMD || STREAM->Mode == PDN_LINKED)
+			&& (STREAM->Mode == PDN_NODECMD || STREAM->Mode == PDN_LINKED || STREAM->Mode == PDN_LOCAL)
 			&& Now - STREAM->LastActivity > STREAM->IdleTime)
 		{
 			PdnLog("Stream %d: %s idle for %d seconds - disconnecting", n + 1, STREAM->Remote, STREAM->IdleTime);
@@ -1610,10 +1728,10 @@ void PdnHostInit()
 
 void PdnHostPoll(int WaitMs)
 {
-	fd_set rfds;
+	fd_set rfds, wfds;
 	struct timeval tv;
 	time_t Now;
-	int i, Sock;
+	int i, Sock, Max;
 
 	pthread_mutex_lock(&PdnLock);
 
@@ -1643,29 +1761,41 @@ void PdnHostPoll(int WaitMs)
 		}
 	}
 
-	Sock = RHPSock;
-	pthread_mutex_unlock(&PdnLock);
-
-	if (Sock == -1)
-	{
-		Sleep(WaitMs);
-		return;
-	}
+	// Wait for the RHP socket or a telnet login
 
 	FD_ZERO(&rfds);
-	FD_SET(Sock, &rfds);
-	tv.tv_sec = WaitMs / 1000;
-	tv.tv_usec = (WaitMs % 1000) * 1000;
+	FD_ZERO(&wfds);
+	Max = -1;
+	Sock = RHPSock;
 
-	if (select(Sock + 1, &rfds, NULL, NULL, &tv) > 0)
+	if (Sock != -1)
 	{
-		pthread_mutex_lock(&PdnLock);
-
-		if (RHPSock == Sock)
-			RHPRead();
-
-		pthread_mutex_unlock(&PdnLock);
+		FD_SET(Sock, &rfds);
+		Max = Sock;
 	}
+
+	PdnTelnetFds(&rfds, &wfds, &Max);
+	pthread_mutex_unlock(&PdnLock);
+
+	if (Max == -1)
+		Sleep(WaitMs);
+	else
+	{
+		tv.tv_sec = WaitMs / 1000;
+		tv.tv_usec = (WaitMs % 1000) * 1000;
+
+		if (select(Max + 1, &rfds, &wfds, NULL, &tv) <= 0)
+			FD_ZERO(&rfds);
+	}
+
+	pthread_mutex_lock(&PdnLock);
+
+	if (Sock != -1 && RHPSock == Sock && FD_ISSET(Sock, &rfds))
+		RHPRead();
+
+	PdnTelnetPoll();
+
+	pthread_mutex_unlock(&PdnLock);
 }
 
 void PdnHostClose()
@@ -1693,6 +1823,8 @@ void PdnHostClose()
 		close(RHPSock);
 
 	RHPSock = -1;
+
+	PdnTelnetClose();
 	pthread_mutex_unlock(&PdnLock);
 }
 
@@ -1954,6 +2086,12 @@ DllExport int APIENTRY SendMsg(int stream, char * msg, int len)
 		STREAM->TxOutstanding++;
 		RHPSend(Msg);
 		break;
+
+	case PDN_LOCAL:
+
+		if (STREAM->Local && !STREAM->RemoteClosed)
+			PdnTelnetSend(STREAM->Local - 1, msg, len);
+		break;
 	}
 
 	pthread_mutex_unlock(&PdnLock);
@@ -1962,10 +2100,20 @@ DllExport int APIENTRY SendMsg(int stream, char * msg, int len)
 
 DllExport int APIENTRY TXCount(int stream)
 {
+	int Count;
+
 	if (stream < 1 || stream > PDN_MAXSTREAMS)
 		return 0;
 
-	return Streams[stream - 1].TxOutstanding;
+	pthread_mutex_lock(&PdnLock);
+
+	if (Streams[stream - 1].Mode == PDN_LOCAL)
+		Count = Streams[stream - 1].Local ? PdnTelnetQueued(Streams[stream - 1].Local - 1) : 0;
+	else
+		Count = Streams[stream - 1].TxOutstanding;
+
+	pthread_mutex_unlock(&PdnLock);
+	return Count;
 }
 
 DllExport int APIENTRY GetConnectionInfo(int stream, char * callsign,
@@ -1991,11 +2139,21 @@ DllExport int APIENTRY GetConnectionInfo(int stream, char * callsign,
 	sprintf(Call, "%-10s", STREAM->Remote);
 	memcpy(callsign, Call, 10);
 
+	if (STREAM->Mode == PDN_LOCAL)
+	{
+		// A telnet login, as LinBPQ's Telnet driver reports one. The return
+		// value is the secure session flag: a sysop login.
+
+		*sesstype = Sess_PACTOR | Sess_UPLINK;
+		*paclen = 256;
+		return STREAM->Secure;
+	}
+
 	*port = PdnPortNumber(STREAM->PortLabel);
 	*sesstype = STREAM->Incoming ? (Sess_L2LINK | Sess_UPLINK) : Sess_L2LINK;
 	*paclen = 0;				// Let the mail code choose (236)
 
-	return 0;					// Never a secure (console) session
+	return 0;					// Never a secure session over the air
 }
 
 DllExport int APIENTRY ChangeSessionIdletime(int Stream, int idletime)

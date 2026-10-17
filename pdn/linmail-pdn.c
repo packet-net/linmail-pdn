@@ -583,15 +583,36 @@ static int SetOption(const char * Key, const char * Value)
 		WebPort = atoi(Value);
 	else if (_stricmp(Key, "html_dir") == 0)
 		Copy(HtmlDir, sizeof(HtmlDir), Value);
+	else if (PdnTelnetOption(Key, Value))
+		;							// telnet_port, fbb_port, telnet_bind, telnet_max, user
 	else
 		return FALSE;
 
 	return TRUE;
 }
 
+static int IsUserLine(char * Line)
+{
+	// A user line is a LinBPQ USER= line, pasted as it is
+
+	while (*Line == ' ' || *Line == '\t')
+		Line++;
+
+	if (_memicmp(Line, "user", 4) != 0)
+		return FALSE;
+
+	Line += 4;
+
+	while (*Line == ' ' || *Line == '\t')
+		Line++;
+
+	return *Line == '=';
+}
+
 static int LoadSettingsFile(char * FileName, int Required)
 {
-	// key = value lines. # starts a comment.
+	// key = value lines. # starts a comment, except in a user line: its
+	// password may hold a #, and as in bpq32.cfg a ; starts its comment.
 
 	FILE * Handle = fopen(FileName, "r");
 	char Line[512];
@@ -614,7 +635,11 @@ static int LoadSettingsFile(char * FileName, int Required)
 		char * Key = Line, * Value, * End;
 
 		LineNo++;
-		strlop(Line, '#');
+
+		if (IsUserLine(Line))
+			strlop(Line, ';');
+		else
+			strlop(Line, '#');
 
 		while (*Key == ' ' || *Key == '\t')
 			Key++;
@@ -958,6 +983,10 @@ int main(int argc, char * argv[])
 		SetAppl(conn->BPQStream, (i == 0 && EnableUI) ? 0x82 : 2, BBSApplMask);
 		Disconnect(conn->BPQStream);
 	}
+
+	// Telnet and FBB logins, if a port is set
+
+	PdnTelnetInit();
 
 	// The SMTP, POP3 and NNTP servers are not part of linmail-pdn. Start the
 	// TCP code with their ports zeroed so no listener opens, then put the

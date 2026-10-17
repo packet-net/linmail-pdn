@@ -22,7 +22,7 @@ SUPPORT_SRCS = Housekeeping.c UIRoutines.c utf8Routines.c md5.c compatbits.c \
  CMSAuth.c HTMLCommonCode.c
 
 # The pdn shim
-SHIM_SRCS = linmail-pdn.c pdnhost.c pdnweb.c pdnstubs.c
+SHIM_SRCS = linmail-pdn.c pdnhost.c pdnweb.c pdntelnet.c pdnstubs.c
 
 # Versions. LINBPQ_VERSION is G8BPQ's, from Versions.h (KVerstring). This
 # build's own, PDN_VERSION, is <LinBPQ version>-pdn<n> for a release (set by

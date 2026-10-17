@@ -35,5 +35,26 @@ void PdnHostInit();
 void PdnHostPoll(int WaitMs);		// Service the RHP socket. Waits up to WaitMs for input
 void PdnHostClose();
 int PdnPortNumber(const char * Label);
+int PdnIsCallsign(char * Call);
+
+//	Logins that arrive some other way than pdn (pdntelnet.c). A local login
+//	gets a BBS stream exactly as an inbound pdn connect does; the stream then
+//	reads from and writes to the login instead of an RHP handle.
+
+int PdnLocalConnect(char * Call, int Secure, int Id, char * Peer);	// Stream (0 based), or -1 if none is free
+void PdnLocalData(int n, UCHAR * Data, int Len);	// From the caller to the BBS
+void PdnLocalClosed(int n);							// The caller has gone
+int PdnLocalBacklog(int n);							// Bytes the BBS has not yet read, roughly
+
+//	pdntelnet.c: LinBPQ style telnet and FBB logins
+
+int PdnTelnetOption(const char * Key, const char * Value);
+void PdnTelnetInit();
+void PdnTelnetFds(fd_set * Read, fd_set * Write, int * Max);
+void PdnTelnetPoll();
+void PdnTelnetClose();
+int PdnTelnetSend(int Id, UCHAR * Data, int Len);	// From the BBS to the caller
+int PdnTelnetQueued(int Id);						// Output not yet sent, in 256 byte buffers
+void PdnTelnetHangup(int Id);						// The BBS has disconnected
 
 #endif
