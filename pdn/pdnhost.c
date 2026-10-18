@@ -28,8 +28,9 @@ along with LinBPQ/BPQ32.  If not, see http://www.gnu.org/licenses
 //			  normal connect, data and disconnect.
 //
 //	Outbound: ConnectUsingAppl gives the mail code a stream "connected to the
-//			  node", as in BPQ. The connect script's first line (C port CALL)
-//			  is turned into an RHP open, and the result comes back as the
+//			  node", as in BPQ. The connect script's first line (C port CALL,
+//			  or C CALL with no port, which pdn routes to an app or over
+//			  NET/ROM) is turned into an RHP open, and the result comes back as the
 //			  BPQ-style node text the script engine looks for (Connected to,
 //			  Busy from, Failure with). Once the open succeeds the stream is
 //			  transparent, so later script lines go to the far node as data.
@@ -82,6 +83,7 @@ struct PdnStream
 	int IdleTime;				// Seconds, as set by ChangeSessionIdletime. 0 = none
 	char Remote[16];
 	char PortLabel[32];
+	int NoPort;					// The script's C named no port: pdn routes it (app or NET/ROM)
 	struct PdnBuf * RxHead;
 	struct PdnBuf * RxTail;
 	int RxCount;
@@ -573,6 +575,7 @@ static void EndSession(int n)
 	STREAM->Secure = 0;
 	STREAM->Remote[0] = 0;
 	STREAM->PortLabel[0] = 0;
+	STREAM->NoPort = 0;
 
 	if (BPQHOSTVECTOR[n].HOSTSESSION)
 	{
@@ -649,6 +652,65 @@ int PdnIsCallsign(char * Call)
 	return 1;
 }
 
+static int PdnIsCallOrAlias(char * Call)
+{
+	// What pdn's RHP open takes as a remote: 1 to 6 letters and digits, with an
+	// optional numeric SSID 0-15. That covers a callsign and a NET/ROM alias
+	// (GB7WOD, BRK, WODCHT), which pdn resolves when no port is given.
+
+	char * ssid = strchr(Call, '-');
+	int len = ssid ? (int)(ssid - Call) : (int)strlen(Call);
+	int i;
+
+	if (len < 1 || len > 6)
+		return 0;
+
+	for (i = 0; i < len; i++)
+		if (!isalnum((unsigned char)Call[i]))
+			return 0;
+
+	if (ssid)
+	{
+		ssid++;
+		if (*ssid == 0 || strlen(ssid) > 2)
+			return 0;
+
+		for (i = 0; ssid[i]; i++)
+			if (!isdigit((unsigned char)ssid[i]))
+				return 0;
+
+		if (atoi(ssid) > 15)
+			return 0;
+	}
+	return 1;
+}
+
+static void SendOpen(int n, char * Port)
+{
+	struct PdnStream * STREAM = &Streams[n];
+	char Local[16];
+	json_t * Msg;
+
+	ConvFromAX25(Sessions[n].L4USER, Local);
+	strlop(Local, ' ');
+
+	Msg = NewRequest("open", &STREAM->OpenId);
+	json_object_set_new(Msg, "pfam", json_string("ax25"));
+	json_object_set_new(Msg, "mode", json_string("stream"));
+	json_object_set_new(Msg, "port", Port ? json_string(Port) : json_null());
+	json_object_set_new(Msg, "local", json_string(Local));
+	json_object_set_new(Msg, "remote", json_string(STREAM->Remote));
+	json_object_set_new(Msg, "flags", json_integer(128));		// Active
+
+	STREAM->Mode = PDN_OPENING;
+	strncpy(STREAM->PortLabel, Port ? Port : "", 31);
+
+	PdnLog("Stream %d: connecting %s to %s %s%s", n + 1, Local, STREAM->Remote,
+		Port ? "on port " : "", Port ? Port : "(routed by pdn: a local app or NET/ROM)");
+
+	RHPSend(Msg);
+}
+
 static void Unmapped(int n, char * Line, char * Why)
 {
 	PdnLog("Stream %d: node command not mapped to pdn: \"%s\" (%s)", n + 1, Line, Why);
@@ -660,8 +722,6 @@ static void NodeConnect(int n, char ** Tok, int Count, char * Line)
 	struct PdnStream * STREAM = &Streams[n];
 	char * Port = NULL;
 	char * Call;
-	char Local[16];
-	json_t * Msg;
 	int i;
 
 	// Drop a trailing S (stay) - pdn returns us to nothing, so stay means nothing here
@@ -693,17 +753,11 @@ static void NodeConnect(int n, char ** Tok, int Count, char * Line)
 
 	_strupr(Call);
 
-	if (!PdnIsCallsign(Call))
+	if (Port ? !PdnIsCallsign(Call) : !PdnIsCallOrAlias(Call))
 	{
-		// BPQ would try NET/ROM aliases and applications here. pdn's RHP open
-		// is AX.25 only.
-
-		Unmapped(n, Line, "only direct AX.25 connects to a callsign are supported");
+		Unmapped(n, Line, Port ? "a connect on a port needs a callsign" : "connect command not understood");
 		return;
 	}
-
-	if (Port == NULL && PdnCfg.DefaultPort[0])
-		Port = PdnCfg.DefaultPort;
 
 	if (RHPSock == -1)
 	{
@@ -712,24 +766,15 @@ static void NodeConnect(int n, char ** Tok, int Count, char * Line)
 		return;
 	}
 
-	ConvFromAX25(Sessions[n].L4USER, Local);
-	strlop(Local, ' ');
+	// C CALL with no port goes to pdn with no port, as BPQ's node takes it: pdn
+	// tries a local app, then its NET/ROM table by callsign or alias (a pdn
+	// with packet.net#932). If pdn has no route and default_port is set, the
+	// reply handler dials that port instead, as BPQ dials its only port.
 
-	Msg = NewRequest("open", &STREAM->OpenId);
-	json_object_set_new(Msg, "pfam", json_string("ax25"));
-	json_object_set_new(Msg, "mode", json_string("stream"));
-	json_object_set_new(Msg, "port", Port ? json_string(Port) : json_null());
-	json_object_set_new(Msg, "local", json_string(Local));
-	json_object_set_new(Msg, "remote", json_string(Call));
-	json_object_set_new(Msg, "flags", json_integer(128));		// Active
-
-	STREAM->Mode = PDN_OPENING;
-	strcpy(STREAM->Remote, Call);
-	strncpy(STREAM->PortLabel, Port ? Port : "", 31);
-
-	PdnLog("Stream %d: connecting %s to %s on port %s", n + 1, Local, Call, Port ? Port : "(local app)");
-
-	RHPSend(Msg);
+	strncpy(STREAM->Remote, Call, sizeof(STREAM->Remote) - 1);
+	STREAM->Remote[sizeof(STREAM->Remote) - 1] = 0;
+	STREAM->NoPort = (Port == NULL);
+	SendOpen(n, Port);
 }
 
 static void NodeCommand(int n, char * Line)
@@ -1070,22 +1115,36 @@ static void ProcessOpenReply(json_t * Msg)
 	if (Err)
 	{
 		const char * Text = ErrText(Msg);
-		char Upper[256];
-
-		strncpy(Upper, Text, 255);
-		Upper[255] = 0;
-		_strupr(Upper);
+		int NoPort = STREAM->NoPort;
 
 		PdnLog("Stream %d: connect to %s failed: %d %s", n + 1, STREAM->Remote, Err, Text);
 
+		// A C CALL with no port that pdn could not route (15 No Route; 10 from a
+		// node without NET/ROM routing or older than packet.net#932) goes out on
+		// default_port when one is set
+
+		if (NoPort && (Err == 15 || Err == 10) && PdnCfg.DefaultPort[0])
+		{
+			STREAM->NoPort = 0;
+			PdnLog("Stream %d: no route to %s from pdn - trying default port %s", n + 1, STREAM->Remote, PdnCfg.DefaultPort);
+			SendOpen(n, PdnCfg.DefaultPort);
+			return;
+		}
+
 		STREAM->Mode = PDN_NODECMD;
+		STREAM->NoPort = 0;
 
-		// pdn's openReply does not say whether the far end sent DM (busy) or
-		// never answered (both are errCode 15; packet.net issue #849), so
-		// only an explicit "busy" becomes Busy from.
+		// pdn's failure codes (packet.net#849) as BPQ's node words them: 19 the
+		// far end refused (DM, or a NET/ROM busy), 15 or 10 for a C with no port
+		// nothing could route (BPQ's reply when a call is in neither its
+		// applications nor its NODES and it has more than one port), and
+		// anything else (20 no answer, 21 timed out, 22 link reset) a failure.
+		// The script engine takes all of them down the same ELSE path.
 
-		if (strstr(Upper, "BUSY"))
+		if (Err == 19)
 			NodeReply(n, "Busy from %s\r", STREAM->Remote);
+		else if (NoPort && (Err == 15 || Err == 10))
+			NodeReply(n, "Downlink connect needs port number - C P CALLSIGN\r");
 		else
 			NodeReply(n, "Failure with %s\r", STREAM->Remote);
 
@@ -1097,6 +1156,7 @@ static void ProcessOpenReply(json_t * Msg)
 		return;
 	}
 
+	STREAM->NoPort = 0;
 	STREAM->Mode = PDN_LINKED;
 	STREAM->Handle = Handle;
 
