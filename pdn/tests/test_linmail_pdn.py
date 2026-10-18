@@ -293,6 +293,21 @@ def test_no_route_with_no_port_falls_back_to_default_port(linmail, fake):
     assert ports == [None, "bpq"]
 
 
+def test_next_hops_down_is_failure_and_skips_default_port(linmail, fake):
+    """20 on a portless open (a NET/ROM destination whose next hops are all down)
+    is Failure with, and default_port is not tried: it is a known node, not no route."""
+    linmail.write("linmail.cfg", linmail_cfg(partners=[partner(script=("C GB7MNK", "ELSE", "C 1 N0BPQ-1"))]))
+    fake.on_open = lambda m: (20, "Connect to GB7MNK got no answer over NET/ROM") if m["remote"] == "GB7MNK" else (0, "Ok")
+    linmail.start("-m", "1=bpq", "-n", "N0PDN", "-p", "bpq")
+    fake.wait_msg("listenReply", direction="out")
+    h = login(fake)
+    post(fake, h, "N0ABC @ N0BPQ", "Next hops test", ["x"])
+
+    linmail.wait_bbslog(r"N0PDN\} Failure with GB7MNK", timeout=30)
+    linmail.wait_bbslog(r"N0PDN\} Connected to N0BPQ-1", timeout=30)
+    assert [(m["remote"], m["port"]) for m in fake.messages("open")] == [("GB7MNK", None), ("N0BPQ-1", "bpq")]
+
+
 def test_multi_hop_script(linmail, fake):
     """After the first hop the stream is transparent: later lines go to the far node."""
     linmail.write("linmail.cfg", linmail_cfg(partners=[partner(script=("C 1 N0BPQ", "BBS"))]))
