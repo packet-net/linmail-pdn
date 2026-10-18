@@ -28,8 +28,10 @@ rhp = 127.0.0.1:9000
 # in linmail.cfg).
 portmap = 1=vhf, 2=hf
 
-# pdn port for a connect line with no port. Empty means only other apps on
-# the same node can be reached that way.
+# pdn port for a connect line with no port that pdn cannot route itself. A
+# "C CALL" with no port goes to pdn first, which reaches another app on the
+# node or a NET/ROM destination by callsign or alias; if pdn has no route, the
+# connect is made on this port instead. Empty means no fallback.
 #default_port = vhf
 
 # Print all RHP traffic
